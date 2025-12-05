@@ -4,6 +4,8 @@ import OpenAI from "openai";
 
 const BOT_USER_ID = "U51d2392e43f851607a191adb3ec49b26";
 const app = express();
+
+// 讓 Express 會解析 JSON（在部分環境很重要）
 app.use(express.json());
 
 // LINE 設定
@@ -109,6 +111,7 @@ async function geocodeCity(city, apiKey) {
 }
 
 // 查天氣 + 穿搭建議（支援城市名或座標、今天/明天/後天、降雨機率）
+// 使用 free plan 的 forecast API
 async function getWeatherAndOutfit({
   city = "Taipei",
   lat,
@@ -126,7 +129,6 @@ async function getWeatherAndOutfit({
     let resolvedLat = lat;
     let resolvedLon = lon;
 
-    // 如果沒座標，先用城市名找座標
     if (!resolvedLat || !resolvedLon) {
       const geo = await geocodeCity(city, apiKey);
       if (!geo) {
@@ -137,18 +139,17 @@ async function getWeatherAndOutfit({
       resolvedCity = geo.name;
     }
 
-    // Free plan: 使用 2.5 forecast (3 小時間隔，含 pop)
     const forecastUrl = `https://api.openweathermap.org/data/2.5/forecast?lat=${resolvedLat}&lon=${resolvedLon}&units=metric&lang=zh_tw&appid=${apiKey}`;
     const res = await fetch(forecastUrl);
     if (!res.ok) {
-      console.error("Weather API error:", res.status, res.statusText);
+      const text = await res.text();
+      console.error("Weather API error:", res.status, text);
       return "查天氣時發生錯誤，可能是城市名稱或座標有問題，或 API 暫時掛了。";
     }
 
     const data = await res.json();
     const dayIndex = when === "tomorrow" ? 1 : when === "day_after" ? 2 : 0;
 
-    // 依照時區 offset 判斷目標日期，挑中午的預報（沒有就拿該日第一筆）
     const offsetSec = data.city?.timezone ?? 0;
     const now = Date.now();
     const targetDateStr = new Date(now + dayIndex * 24 * 60 * 60 * 1000)
@@ -205,58 +206,51 @@ async function getWeatherAndOutfit({
 }
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
-  const events = req.body.events;
+  const events = req.body.events || [];
 
   for (const event of events) {
-    if (event.type !== "message") continue;
+    try {
+      if (event.type !== "message") continue;
 
-    // ----------------------------
-    // ① 處理使用者分享的定位，直接查天氣
-    // ----------------------------
-    if (event.message.type === "location") {
-      const { address, latitude, longitude } = event.message;
-      const info = await getWeatherAndOutfit({
-        lat: latitude,
-        lon: longitude,
-        address,
-        when: "today",
-      });
+      // ① 使用者分享定位 → 直接查天氣
+      if (event.message.type === "location") {
+        const { address, latitude, longitude } = event.message;
+        const info = await getWeatherAndOutfit({
+          lat: latitude,
+          lon: longitude,
+          address,
+          when: "today",
+        });
 
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: info,
-      });
-      continue;
-    }
+        await client.replyMessage(event.replyToken, {
+          type: "text",
+          text: info,
+        });
+        continue;
+      }
 
-    if (event.message.type !== "text") continue;
+      if (event.message.type !== "text") continue;
 
-    const userMessage = event.message.text.trim();
+      const userMessage = event.message.text.trim();
 
-    // ----------------------------
-    // ② GROUP MODE: 只有被 @ 才理
-    // ----------------------------
-    if (event.source.type === "group") {
-      const mention = event.message?.mention;
+      // ② 群組模式：只有被 @ 才回
+      if (event.source.type === "group") {
+        const mention = event.message?.mention;
+        if (!mention || !mention.mentionees) continue;
 
-      if (!mention || !mention.mentionees) continue;
+        const mentionedBot = mention.mentionees.some(
+          (m) => m.userId === BOT_USER_ID
+        );
+        if (!mentionedBot) continue;
+      }
 
-      const mentionedBot = mention.mentionees.some(
-        (m) => m.userId === BOT_USER_ID
-      );
-
-      if (!mentionedBot) continue;
-    }
-
-    // ----------------------------
-    // ③ 用 GPT 判斷是否是問天氣（含明天/後天）
-    // ----------------------------
-    const intent = await openai.responses.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `
+      // ③ 用 GPT 判斷是不是在問天氣 / 穿搭
+      const intent = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `
 你是一個意圖判斷與解析器。判斷訊息是否為「詢問天氣」或「詢問穿搭」。
 
 如果訊息是在問天氣、氣溫、下雨、穿什麼、冷不冷，請回：
@@ -265,50 +259,52 @@ when 僅能是 today / tomorrow / day_after （使用者問「明天」就回 to
 
 如果不是，請回：
 NO
-          `,
-        },
-        { role: "user", content: userMessage },
-      ],
-    });
+            `,
+          },
+          { role: "user", content: userMessage },
+        ],
+      });
 
-    const intentText = intent.output_text.trim();
+      const intentText =
+        intent.choices[0].message.content?.trim?.() ?? "NO";
 
-    if (intentText.startsWith("WEATHER")) {
-      const [, cityRaw, whenRaw] = intentText.split("|");
-      const city = (cityRaw || "Taipei").trim();
-      const when = normalizeWhen(whenRaw || "today");
+      if (intentText.startsWith("WEATHER")) {
+        const [, cityRaw, whenRaw] = intentText.split("|");
+        const city = (cityRaw || "Taipei").trim();
+        const when = normalizeWhen(whenRaw || "today");
 
-      const info = await getWeatherAndOutfit({ city, when });
+        const info = await getWeatherAndOutfit({ city, when });
+
+        await client.replyMessage(event.replyToken, {
+          type: "text",
+          text: info,
+        });
+        continue;
+      }
+
+      // ④ 一般聊天 → GPT 回覆
+      const reply = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `
+你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。
+你是 Kevin 自己架在 Vercel 上的 LINE Bot，由 OpenAI API 驅動。
+            `,
+          },
+          { role: "user", content: userMessage },
+        ],
+      });
 
       await client.replyMessage(event.replyToken, {
         type: "text",
-        text: info,
+        text: reply.choices[0].message.content,
       });
-
-      continue; // 不進入一般 GPT 回覆
+    } catch (err) {
+      console.error("Error handling event:", err);
+      // 失敗也回 200，避免 LINE 一直重送
     }
-
-    // ----------------------------
-    // ④ 一般聊天 → GPT 回覆
-    // ----------------------------
-    const reply = await openai.responses.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `
-你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。
-你是 Kevin 自己架在 Vercel 上的 LINE Bot，由 OpenAI API 驅動。
-          `,
-        },
-        { role: "user", content: userMessage },
-      ],
-    });
-
-    await client.replyMessage(event.replyToken, {
-      type: "text",
-      text: reply.output_text,
-    });
   }
 
   res.status(200).end();
