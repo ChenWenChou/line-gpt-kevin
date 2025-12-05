@@ -136,7 +136,8 @@ async function getWeatherAndOutfit({
       resolvedCity = geo.name;
     }
 
-    const forecastUrl = `https://api.openweathermap.org/data/3.0/onecall?lat=${resolvedLat}&lon=${resolvedLon}&units=metric&lang=zh_tw&exclude=minutely,alerts&appid=${apiKey}`;
+    // Free plan: 使用 2.5 forecast (3 小時間隔，含 pop)
+    const forecastUrl = `https://api.openweathermap.org/data/2.5/forecast?lat=${resolvedLat}&lon=${resolvedLon}&units=metric&lang=zh_tw&appid=${apiKey}`;
     const res = await fetch(forecastUrl);
     if (!res.ok) {
       console.error("Weather API error:", res.status, res.statusText);
@@ -145,20 +146,38 @@ async function getWeatherAndOutfit({
 
     const data = await res.json();
     const dayIndex = when === "tomorrow" ? 1 : when === "day_after" ? 2 : 0;
-    const targetDaily = data.daily?.[dayIndex];
 
-    if (!targetDaily) {
+    // 依照時區 offset 判斷目標日期，挑中午的預報（沒有就拿該日第一筆）
+    const offsetSec = data.city?.timezone ?? 0;
+    const now = Date.now();
+    const targetDateStr = new Date(now + dayIndex * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+
+    const pickSlot = (list) => {
+      const sameDay = list.filter((item) => {
+        const local = new Date((item.dt + offsetSec) * 1000)
+          .toISOString()
+          .slice(0, 10);
+        return local === targetDateStr;
+      });
+      if (sameDay.length === 0) return null;
+      const noon =
+        sameDay.find((item) => item.dt_txt?.includes("12:00:00")) || sameDay[0];
+      return noon;
+    };
+
+    const slot = pickSlot(data.list || []);
+
+    if (!slot) {
       return "暫時查不到這個時間點的天氣，等等再試一次。";
     }
 
-    const temp = targetDaily.temp?.day ?? data.current?.temp;
-    const feels = targetDaily.feels_like?.day ?? data.current?.feels_like;
-    const humidity = targetDaily.humidity ?? data.current?.humidity;
-    const desc =
-      targetDaily.weather?.[0]?.description ||
-      data.current?.weather?.[0]?.description ||
-      "未知";
-    const pop = typeof targetDaily.pop === "number" ? targetDaily.pop : 0;
+    const temp = slot.main?.temp;
+    const feels = slot.main?.feels_like ?? temp;
+    const humidity = slot.main?.humidity ?? "NA";
+    const desc = slot.weather?.[0]?.description || "未知";
+    const pop = typeof slot.pop === "number" ? slot.pop : 0;
     const rainPercent = Math.round(pop * 100);
     const rainText = `降雨機率：${rainPercent}%`;
     const locationLabel = address
@@ -170,7 +189,9 @@ async function getWeatherAndOutfit({
     return (
       `【${locationLabel}｜${whenLabel}天氣】\n` +
       `狀態：${desc}\n` +
-      `溫度：${temp.toFixed(1)}°C（體感 ${feels.toFixed(1)}°C）\n` +
+      `溫度：${temp?.toFixed ? temp.toFixed(1) : temp}°C（體感 ${
+        feels?.toFixed ? feels.toFixed(1) : feels
+      }°C）\n` +
       `濕度：${humidity}%\n` +
       `${rainText}\n` +
       `\n【穿搭建議】\n` +
@@ -229,7 +250,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     // ----------------------------
     // ③ 用 GPT 判斷是否是問天氣（含明天/後天）
     // ----------------------------
-    const intent = await openai.chat.completions.create({
+    const intent = await openai.responses.create({
       model: "gpt-4o-mini",
       messages: [
         {
@@ -249,7 +270,7 @@ NO
       ],
     });
 
-    const intentText = intent.choices[0].message.content.trim();
+    const intentText = intent.output_text.trim();
 
     if (intentText.startsWith("WEATHER")) {
       const [, cityRaw, whenRaw] = intentText.split("|");
@@ -269,7 +290,7 @@ NO
     // ----------------------------
     // ④ 一般聊天 → GPT 回覆
     // ----------------------------
-    const reply = await openai.chat.completions.create({
+    const reply = await openai.responses.create({
       model: "gpt-4o-mini",
       messages: [
         {
@@ -285,7 +306,7 @@ NO
 
     await client.replyMessage(event.replyToken, {
       type: "text",
-      text: reply.choices[0].message.content,
+      text: reply.output_text,
     });
   }
 
