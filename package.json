@@ -1,0 +1,10 @@
+{
+  "name": "line-gpt-kevin",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@line/bot-sdk": "7.5.2",
+    "express": "4.18.2",
+    "openai": "4.0.0"
+  }
+}
