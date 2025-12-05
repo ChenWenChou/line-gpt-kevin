@@ -5,9 +5,6 @@ import OpenAI from "openai";
 const BOT_USER_ID = "U51d2392e43f851607a191adb3ec49b26";
 const app = express();
 
-// 讓 Express 會解析 JSON（在部分環境很重要）
-app.use(express.json());
-
 // LINE 設定
 const config = {
   channelAccessToken: process.env.LINE_TOKEN,
