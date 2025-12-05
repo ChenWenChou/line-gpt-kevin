@@ -4,6 +4,7 @@ import OpenAI from "openai";
 
 const BOT_USER_ID = "U51d2392e43f851607a191adb3ec49b26";
 const app = express();
+app.use(express.json());
 
 // LINE 設定
 const config = {
