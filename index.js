@@ -158,21 +158,20 @@ function buildOutfitAdvice(temp, feelsLike, rainProbability) {
 
 // 台灣離島人工座標
 const TAIWAN_ISLANDS = {
-  "南竿": { lat: 26.1597, lon: 119.9519, name: "南竿（馬祖）" },
-  "北竿": { lat: 26.2244, lon: 119.9987, name: "北竿（馬祖）" },
-  "東引": { lat: 26.3667, lon: 120.4833, name: "東引（馬祖）" },
-  "金門": { lat: 24.4367, lon: 118.3186, name: "金門" },
-  "烏丘": { lat: 24.9986, lon: 119.3347, name: "烏丘" },
-  "澎湖": { lat: 23.565, lon: 119.586, name: "澎湖" },
-  "馬祖": { lat: 26.1597, lon: 119.9519, name: "馬祖" },
-  "馬祖列島": { lat: 26.1597, lon: 119.9519, name: "馬祖列島" },
+  南竿: { lat: 26.1597, lon: 119.9519, name: "南竿（馬祖）" },
+  北竿: { lat: 26.2244, lon: 119.9987, name: "北竿（馬祖）" },
+  東引: { lat: 26.3667, lon: 120.4833, name: "東引（馬祖）" },
+  金門: { lat: 24.4367, lon: 118.3186, name: "金門" },
+  烏丘: { lat: 24.9986, lon: 119.3347, name: "烏丘" },
+  澎湖: { lat: 23.565, lon: 119.586, name: "澎湖" },
+  馬祖: { lat: 26.1597, lon: 119.9519, name: "馬祖" },
+  馬祖列島: { lat: 26.1597, lon: 119.9519, name: "馬祖列島" },
 };
-
 
 async function geocodeCity(city, apiKey) {
   const c = city.trim();
 
-    // ① 先檢查是否為台灣離島
+  // ① 先檢查是否為台灣離島
   for (const key of Object.keys(TAIWAN_ISLANDS)) {
     if (c.includes(key)) {
       return TAIWAN_ISLANDS[key];
