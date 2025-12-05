@@ -168,6 +168,46 @@ async function getWeatherAndOutfit({
 
     const slot = pickSlot(data.list || []);
 
+    // --- 計算當日最高 / 最低溫 ---
+    const sameDayEntries = (data.list || []).filter((item) => {
+      const local = new Date((item.dt + offsetSec) * 1000)
+        .toISOString()
+        .slice(0, 10);
+      return local === targetDateStr;
+    });
+
+    // 如果找到同日資料 → 計算 max / min
+    let maxTemp = null;
+    let minTemp = null;
+
+    if (sameDayEntries.length > 0) {
+      const temps = sameDayEntries.map((i) => i.main?.temp).filter(Boolean);
+      maxTemp = Math.max(...temps);
+      minTemp = Math.min(...temps);
+    }
+    // --- 計算體感溫度區間 ---
+    let maxFeels = null;
+    let minFeels = null;
+
+    if (sameDayEntries.length > 0) {
+      const feels = sameDayEntries
+        .map((i) => i.main?.feels_like)
+        .filter(Boolean);
+      maxFeels = Math.max(...feels);
+      minFeels = Math.min(...feels);
+    }
+
+    // 格式化（避免 undefined）
+    const tempRangeText =
+      maxTemp !== null
+        ? `氣溫：${minTemp.toFixed(1)}°C ～ ${maxTemp.toFixed(1)}°C\n`
+        : "";
+
+    const feelsRangeText =
+      maxFeels !== null
+        ? `體感：${minFeels.toFixed(1)}°C ～ ${maxFeels.toFixed(1)}°C\n`
+        : "";
+
     if (!slot) {
       return "暫時查不到這個時間點的天氣，等等再試一次。";
     }
@@ -184,16 +224,19 @@ async function getWeatherAndOutfit({
       : resolvedCity || city || "未命名地點";
     const whenLabel = WHEN_LABEL[when] || WHEN_LABEL.today;
     const outfit = buildOutfitAdvice(temp, feels, pop);
+    const maxMinText =
+      maxTemp !== null
+        ? `最高溫：${maxTemp.toFixed(1)}°C\n最低溫：${minTemp.toFixed(1)}°C\n`
+        : "";
 
     return (
       `【${locationLabel}｜${whenLabel}天氣】\n` +
       `狀態：${desc}\n` +
-      `溫度：${temp?.toFixed ? temp.toFixed(1) : temp}°C（體感 ${
-        feels?.toFixed ? feels.toFixed(1) : feels
-      }°C）\n` +
+      tempRangeText +
+      feelsRangeText +
       `濕度：${humidity}%\n` +
-      `${rainText}\n` +
-      `\n【穿搭建議】\n` +
+      `${rainText}\n\n` +
+      `【穿搭建議】\n` +
       outfit
     );
   } catch (err) {
@@ -262,8 +305,7 @@ NO
         ],
       });
 
-      const intentText =
-        intent.choices[0].message.content?.trim?.() ?? "NO";
+      const intentText = intent.choices[0].message.content?.trim?.() ?? "NO";
 
       if (intentText.startsWith("WEATHER")) {
         const [, cityRaw, whenRaw] = intentText.split("|");
