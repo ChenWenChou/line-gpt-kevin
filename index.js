@@ -57,9 +57,14 @@ function cleanCity(raw) {
     .replace(/明天/g, "")
     .replace(/後天/g, "")
     .replace(/今天/g, "")
+    .replace(/台灣/g, "")
+    .replace(/臺灣/g, "")
+    .replace(/台湾/g, "")
+    .replace(/的/g, "")
     .replace(/市/g, "")
     .replace(/縣/g, "")
     .replace(/區/g, "")
+    .replace(/鄉/g, "")
     .trim();
 
   // 有 "台中" 就固定成台中
@@ -168,15 +173,31 @@ const TAIWAN_ISLANDS = {
   馬祖列島: { lat: 26.1597, lon: 119.9519, name: "馬祖列島" },
 };
 
+function findTaiwanIsland(raw) {
+  if (!raw) return null;
+  const c = raw.trim();
+  const lower = c.toLowerCase();
+
+  if (lower.includes("nangan")) return TAIWAN_ISLANDS["南竿"];
+  if (lower.includes("beigan")) return TAIWAN_ISLANDS["北竿"];
+  if (lower.includes("dongyin")) return TAIWAN_ISLANDS["東引"];
+  if (lower.includes("matsu")) return TAIWAN_ISLANDS["馬祖"];
+  if (lower.includes("kinmen") || lower.includes("jinmen"))
+    return TAIWAN_ISLANDS["金門"];
+  if (lower.includes("penghu")) return TAIWAN_ISLANDS["澎湖"];
+
+  for (const key of Object.keys(TAIWAN_ISLANDS)) {
+    if (c.includes(key)) return TAIWAN_ISLANDS[key];
+  }
+  return null;
+}
+
 async function geocodeCity(city, apiKey) {
   const c = city.trim();
 
   // ① 先檢查是否為台灣離島
-  for (const key of Object.keys(TAIWAN_ISLANDS)) {
-    if (c.includes(key)) {
-      return TAIWAN_ISLANDS[key];
-    }
-  }
+  const island = findTaiwanIsland(c);
+  if (island) return island;
 
   // ① 若使用者明確輸入「國家 城市」
   //    例如「日本 大阪」「韓國 首爾」「美國 紐約」
@@ -295,6 +316,14 @@ async function getWeatherAndOutfit({
     let resolvedCity = city;
     let resolvedLat = lat;
     let resolvedLon = lon;
+
+    // 台灣離島先用人工座標
+    const island = findTaiwanIsland(resolvedCity);
+    if (!resolvedLat && !resolvedLon && island) {
+      resolvedLat = island.lat;
+      resolvedLon = island.lon;
+      resolvedCity = island.name;
+    }
 
     if (!resolvedLat || !resolvedLon) {
       const geo = await geocodeCity(city, apiKey);
@@ -466,8 +495,6 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           userMessage.startsWith("@KevinBot") ||
           userMessage.startsWith("KevinBot") ||
           userMessage.startsWith("kevinbot") ||
-          userMessage.startsWith("Kevin") ||
-          userMessage.startsWith("kevin") ||
           userMessage.startsWith("文哥");
 
         if (!mentionedBot && !calledByName) {
@@ -480,18 +507,17 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       const intent = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
-          {
-            role: "system",
-            content: `
+        {
+          role: "system",
+          content: `
 你是一個意圖判斷與解析器。
 
 【地點判斷規則】
-1. 如果使用者提到「國家 + 城市」如「日本大阪」「韓國首爾」「美國紐約」，直接視為該國城市。
-2. 如果只講城市（如「大阪」「東京」），則根據全世界主要城市推論：
-   - 若該城市在日本常見（大阪、東京、札幌），視為日本
-   - 若是世界常見城市（New York, London, Paris 等）直接使用原名查詢
-3. 如果使用者提到的是台灣城市（台北、台中、桃園、新竹、嘉義、台南、高雄、花蓮、宜蘭、馬祖、金門、澎湖等），一律優先視為台灣。
-4. 若無法判斷，請回推最常見的國際城市名稱（如 Osaka → 日本大阪）。
+1. 使用者提到的台灣城市（台北、台中、桃園、新竹、嘉義、台南、高雄、花蓮、宜蘭、馬祖、金門、澎湖、南竿、北竿、東引等）一律視為台灣的城市或離島。
+2. 如果只講「台中」「台南」「台北」這類簡稱，也必須自動解析為「台灣台中市」「台灣台南市」「台灣台北市」。
+3. 除非使用者明確說「中國的 XXX」，否則地點預設為台灣。
+4. 如果使用者提到「國家 + 城市」如「日本大阪」「韓國首爾」「美國紐約」，直接視為該國城市。
+5. 如果只講國際城市（如大阪、東京、紐約、巴黎等），推論最常見的國家（大阪→日本）。
 
 【意圖規則】
 如果訊息是在問天氣、氣溫、下雨、冷不冷、穿什麼，請回：
@@ -513,10 +539,16 @@ NO
       if (intentText.startsWith("WEATHER")) {
         const [, cityRaw, whenRaw] = intentText.split("|");
         const cityClean = cleanCity(cityRaw || "Taipei");
-        const city = fixTaiwanCity(cityClean);
+        const island = findTaiwanIsland(cityClean);
+        const city = island ? island.name : fixTaiwanCity(cityClean);
         const when = normalizeWhen(whenRaw || "today");
 
-        const info = await getWeatherAndOutfit({ city, when });
+        const info = await getWeatherAndOutfit({
+          city,
+          when,
+          lat: island?.lat,
+          lon: island?.lon,
+        });
 
         await client.replyMessage(event.replyToken, {
           type: "text",
