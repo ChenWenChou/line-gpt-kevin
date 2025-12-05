@@ -157,19 +157,101 @@ function buildOutfitAdvice(temp, feelsLike, rainProbability) {
 }
 
 async function geocodeCity(city, apiKey) {
-  const candidates = [`Taiwan ${city}`, `${city},TW`, city];
+  const c = city.trim();
 
-  for (const q of candidates) {
+  // ① 若使用者明確輸入「國家 城市」
+  //    例如「日本 大阪」「韓國 首爾」「美國 紐約」
+  if (c.includes(" ")) {
     const url = `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(
-      q
+      c
+    )}&limit=1&appid=${apiKey}`;
+
+    const res = await fetch(url);
+    if (res.ok) {
+      const [geo] = await res.json();
+      if (geo) {
+        return {
+          lat: geo.lat,
+          lon: geo.lon,
+          name: geo.local_names?.zh || geo.name || c,
+        };
+      }
+    }
+  }
+
+  // ② 日本常見城市（避免跑到中國）
+  const JP_MAP = {
+    大阪: "Osaka,JP",
+    東京: "Tokyo,JP",
+    京都: "Kyoto,JP",
+    札幌: "Sapporo,JP",
+    橫濱: "Yokohama,JP",
+  };
+
+  if (JP_MAP[c]) {
+    const url = `https://api.openweathermap.org/geo/1.0/direct?q=${JP_MAP[c]}&limit=1&appid=${apiKey}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const [geo] = await res.json();
+      if (geo) {
+        return {
+          lat: geo.lat,
+          lon: geo.lon,
+          name: geo.local_names?.zh || geo.name || c,
+        };
+      }
+    }
+  }
+
+  // ③ 台灣優先（你原本的規則）
+  const TW_MAP = {
+    台北: "Taipei, TW",
+    臺北: "Taipei, TW",
+    新北: "New Taipei, TW",
+    台中: "Taichung, TW",
+    臺中: "Taichung, TW",
+    台南: "Tainan, TW",
+    臺南: "Tainan, TW",
+    高雄: "Kaohsiung, TW",
+    桃園: "Taoyuan, TW",
+    新竹: "Hsinchu, TW",
+    嘉義: "Chiayi, TW",
+    宜蘭: "Yilan, TW",
+    花蓮: "Hualien, TW",
+    台東: "Taitung, TW",
+    臺東: "Taitung, TW",
+  };
+
+  if (TW_MAP[c]) {
+    const url = `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(
+      TW_MAP[c]
     )}&limit=1&appid=${apiKey}`;
     const res = await fetch(url);
-    if (!res.ok) continue;
+    if (res.ok) {
+      const [geo] = await res.json();
+      if (geo) {
+        return {
+          lat: geo.lat,
+          lon: geo.lon,
+          name: geo.local_names?.zh || geo.name || c,
+        };
+      }
+    }
+  }
 
+  // ④ 最後才用原字串查一次（世界城市）
+  const url = `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(
+    c
+  )}&limit=1&appid=${apiKey}`;
+  const res = await fetch(url);
+  if (res.ok) {
     const [geo] = await res.json();
     if (geo) {
-      const name = geo.local_names?.zh || geo.name || city;
-      return { lat: geo.lat, lon: geo.lon, name };
+      return {
+        lat: geo.lat,
+        lon: geo.lon,
+        name: geo.local_names?.zh || geo.name || c,
+      };
     }
   }
 
@@ -385,18 +467,21 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 你是一個意圖判斷與解析器。
 
 【地點判斷規則】
-1. 使用者提到的台灣城市（台北、台中、桃園、新竹、嘉義、台南、高雄、花蓮、宜蘭等）一律優先視為「台灣」的城市。
-2. 如果使用者只講「台中」「台南」「台北」這類簡稱，也必須自動解析為「台灣台中市」「台灣台南市」「台灣台北市」。
-3. 除非使用者明確說「中國的 XXX」，否則地點一律以「台灣」為預設國家。
+1. 如果使用者提到「國家 + 城市」如「日本大阪」「韓國首爾」「美國紐約」，直接視為該國城市。
+2. 如果只講城市（如「大阪」「東京」），則根據全世界主要城市推論：
+   - 若該城市在日本常見（大阪、東京、札幌），視為日本
+   - 若是世界常見城市（New York, London, Paris 等）直接使用原名查詢
+3. 如果使用者提到的是台灣城市（台北、台中、桃園、新竹、嘉義、台南、高雄、花蓮、宜蘭、馬祖、金門、澎湖等），一律優先視為台灣。
+4. 若無法判斷，請回推最常見的國際城市名稱（如 Osaka → 日本大阪）。
 
 【意圖規則】
-如果訊息是在問天氣、氣溫、下雨、穿什麼、冷不冷，請回：
-WEATHER|城市名稱（盡量從文字中推論，推論不到請回 Taipei）|when
+如果訊息是在問天氣、氣溫、下雨、冷不冷、穿什麼，請回：
+WEATHER|城市名稱（英文名）|when
 
 when 僅能是 today / tomorrow / day_after
 （使用者問「明天」就回 tomorrow，「後天」就回 day_after）
 
-如果不是，請回：
+其他請回：
 NO
             `,
           },
