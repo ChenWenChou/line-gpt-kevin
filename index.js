@@ -24,6 +24,30 @@ const WHEN_LABEL = {
   day_after: "後天",
 };
 
+const TW_CITY_MAP = {
+  "台北": "Taipei",
+  "臺北": "Taipei",
+  "新北": "New Taipei",
+  "台中": "Taichung",
+  "臺中": "Taichung",
+  "台南": "Tainan",
+  "臺南": "Tainan",
+  "高雄": "Kaohsiung",
+  "桃園": "Taoyuan",
+  "新竹": "Hsinchu",
+  "嘉義": "Chiayi",
+  "宜蘭": "Yilan",
+  "花蓮": "Hualien",
+  "台東": "Taitung",
+  "臺東": "Taitung",
+};
+
+function fixTaiwanCity(raw) {
+  if (!raw) return raw;
+  const trimmed = raw.trim();
+  return TW_CITY_MAP[trimmed] || trimmed;
+}
+
 function normalizeWhen(raw = "today") {
   const text = raw.toLowerCase();
   if (["tomorrow", "明天", "明日"].includes(text)) return "tomorrow";
@@ -96,15 +120,22 @@ function buildOutfitAdvice(temp, feelsLike, rainProbability) {
 }
 
 async function geocodeCity(city, apiKey) {
-  const geoUrl = `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(
-    city
-  )}&limit=1&appid=${apiKey}`;
-  const geoRes = await fetch(geoUrl);
-  if (!geoRes.ok) return null;
-  const [geo] = await geoRes.json();
-  if (!geo) return null;
-  const name = geo.local_names?.zh || geo.name || city;
-  return { lat: geo.lat, lon: geo.lon, name };
+  // 優先用「Taiwan + 城市」避免跑到中國同名地
+  const queries = [`Taiwan ${city}`, city];
+
+  for (const q of queries) {
+    const geoUrl = `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(
+      q
+    )}&limit=1&appid=${apiKey}`;
+    const geoRes = await fetch(geoUrl);
+    if (!geoRes.ok) continue;
+    const [geo] = await geoRes.json();
+    if (!geo) continue;
+    const name = geo.local_names?.zh || geo.name || city;
+    return { lat: geo.lat, lon: geo.lon, name };
+  }
+
+  return null;
 }
 
 // 查天氣 + 穿搭建議（支援城市名或座標、今天/明天/後天、降雨機率）
@@ -304,19 +335,27 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       const intent = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
-          {
-            role: "system",
-            content: `
-你是一個意圖判斷與解析器。判斷訊息是否為「詢問天氣」或「詢問穿搭」。
+        {
+          role: "system",
+          content: `
+你是一個意圖判斷與解析器。
 
+【地點判斷規則】
+1. 使用者提到的台灣城市（台北、台中、桃園、新竹、嘉義、台南、高雄、花蓮、宜蘭等）一律優先視為「台灣」的城市。
+2. 如果使用者只講「台中」「台南」「台北」這類簡稱，也必須自動解析為「台灣台中市」「台灣台南市」「台灣台北市」。
+3. 除非使用者明確說「中國的 XXX」，否則地點一律以「台灣」為預設國家。
+
+【意圖規則】
 如果訊息是在問天氣、氣溫、下雨、穿什麼、冷不冷，請回：
 WEATHER|城市名稱（盡量從文字中推論，推論不到請回 Taipei）|when
-when 僅能是 today / tomorrow / day_after （使用者問「明天」就回 tomorrow，「後天」就回 day_after）
+
+when 僅能是 today / tomorrow / day_after
+（使用者問「明天」就回 tomorrow，「後天」就回 day_after）
 
 如果不是，請回：
 NO
             `,
-          },
+        },
           { role: "user", content: userMessage },
         ],
       });
@@ -325,7 +364,7 @@ NO
 
       if (intentText.startsWith("WEATHER")) {
         const [, cityRaw, whenRaw] = intentText.split("|");
-        const city = (cityRaw || "Taipei").trim();
+        const city = fixTaiwanCity(cityRaw || "Taipei");
         const when = normalizeWhen(whenRaw || "today");
 
         const info = await getWeatherAndOutfit({ city, when });
