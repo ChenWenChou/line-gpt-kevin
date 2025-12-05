@@ -25,22 +25,59 @@ const WHEN_LABEL = {
 };
 
 const TW_CITY_MAP = {
-  "台北": "Taipei",
-  "臺北": "Taipei",
-  "新北": "New Taipei",
-  "台中": "Taichung",
-  "臺中": "Taichung",
-  "台南": "Tainan",
-  "臺南": "Tainan",
-  "高雄": "Kaohsiung",
-  "桃園": "Taoyuan",
-  "新竹": "Hsinchu",
-  "嘉義": "Chiayi",
-  "宜蘭": "Yilan",
-  "花蓮": "Hualien",
-  "台東": "Taitung",
-  "臺東": "Taitung",
+  台北: "Taipei",
+  臺北: "Taipei",
+  新北: "New Taipei",
+  台中: "Taichung",
+  臺中: "Taichung",
+  台南: "Tainan",
+  臺南: "Tainan",
+  高雄: "Kaohsiung",
+  桃園: "Taoyuan",
+  新竹: "Hsinchu",
+  嘉義: "Chiayi",
+  宜蘭: "Yilan",
+  花蓮: "Hualien",
+  台東: "Taitung",
+  臺東: "Taitung",
 };
+
+function cleanCity(raw) {
+  if (!raw) return raw;
+
+  let c = raw.trim();
+
+  // 去掉常見雜詞
+  c = c
+    .replace(/天氣/g, "")
+    .replace(/氣溫/g, "")
+    .replace(/如何/g, "")
+    .replace(/會不會下雨/g, "")
+    .replace(/下雨嗎/g, "")
+    .replace(/明天/g, "")
+    .replace(/後天/g, "")
+    .replace(/今天/g, "")
+    .replace(/市/g, "")
+    .replace(/縣/g, "")
+    .replace(/區/g, "")
+    .trim();
+
+  // 有 "台中" 就固定成台中
+  if (c.includes("台中") || c.includes("臺中")) return "台中";
+  if (c.includes("台北") || c.includes("臺北")) return "台北";
+  if (c.includes("新北")) return "新北";
+  if (c.includes("桃園")) return "桃園";
+  if (c.includes("高雄")) return "高雄";
+  if (c.includes("台南") || c.includes("臺南")) return "台南";
+  if (c.includes("新竹")) return "新竹";
+  if (c.includes("嘉義")) return "嘉義";
+  if (c.includes("宜蘭")) return "宜蘭";
+  if (c.includes("花蓮")) return "花蓮";
+  if (c.includes("台東") || c.includes("臺東")) return "台東";
+
+  // 無法判斷就用原字串
+  return c;
+}
 
 function fixTaiwanCity(raw) {
   if (!raw) return raw;
@@ -120,14 +157,12 @@ function buildOutfitAdvice(temp, feelsLike, rainProbability) {
 }
 
 async function geocodeCity(city, apiKey) {
-  const candidates = [
-    `Taiwan ${city}`,
-    `${city},TW`,
-    city,
-  ];
+  const candidates = [`Taiwan ${city}`, `${city},TW`, city];
 
   for (const q of candidates) {
-    const url = `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(q)}&limit=1&appid=${apiKey}`;
+    const url = `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(
+      q
+    )}&limit=1&appid=${apiKey}`;
     const res = await fetch(url);
     if (!res.ok) continue;
 
@@ -182,7 +217,7 @@ async function getWeatherAndOutfit({
     if (!res.ok) {
       const text = await res.text();
       console.error("Weather API error:", res.status, text);
-      return "查天氣時發生錯誤，可能是城市名稱或座標有問題，或 API 暫時掛了。";
+      return `查天氣失敗（status: ${res.status}）\n${text.slice(0, 200)}`;
     }
 
     const data = await res.json();
@@ -344,9 +379,9 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       const intent = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
-        {
-          role: "system",
-          content: `
+          {
+            role: "system",
+            content: `
 你是一個意圖判斷與解析器。
 
 【地點判斷規則】
@@ -364,7 +399,7 @@ when 僅能是 today / tomorrow / day_after
 如果不是，請回：
 NO
             `,
-        },
+          },
           { role: "user", content: userMessage },
         ],
       });
@@ -373,7 +408,8 @@ NO
 
       if (intentText.startsWith("WEATHER")) {
         const [, cityRaw, whenRaw] = intentText.split("|");
-        const city = fixTaiwanCity(cityRaw || "Taipei");
+        const cityClean = cleanCity(cityRaw || "Taipei");
+        const city = fixTaiwanCity(cityClean);
         const when = normalizeWhen(whenRaw || "today");
 
         const info = await getWeatherAndOutfit({ city, when });
