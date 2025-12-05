@@ -120,19 +120,22 @@ function buildOutfitAdvice(temp, feelsLike, rainProbability) {
 }
 
 async function geocodeCity(city, apiKey) {
-  // 優先用「Taiwan + 城市」避免跑到中國同名地
-  const queries = [`Taiwan ${city}`, city];
+  const candidates = [
+    `Taiwan ${city}`,
+    `${city},TW`,
+    city,
+  ];
 
-  for (const q of queries) {
-    const geoUrl = `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(
-      q
-    )}&limit=1&appid=${apiKey}`;
-    const geoRes = await fetch(geoUrl);
-    if (!geoRes.ok) continue;
-    const [geo] = await geoRes.json();
-    if (!geo) continue;
-    const name = geo.local_names?.zh || geo.name || city;
-    return { lat: geo.lat, lon: geo.lon, name };
+  for (const q of candidates) {
+    const url = `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(q)}&limit=1&appid=${apiKey}`;
+    const res = await fetch(url);
+    if (!res.ok) continue;
+
+    const [geo] = await res.json();
+    if (geo) {
+      const name = geo.local_names?.zh || geo.name || city;
+      return { lat: geo.lat, lon: geo.lon, name };
+    }
   }
 
   return null;
@@ -160,14 +163,21 @@ async function getWeatherAndOutfit({
     if (!resolvedLat || !resolvedLon) {
       const geo = await geocodeCity(city, apiKey);
       if (!geo) {
-        return "查不到這個城市的天氣，再確認一下城市名稱。";
+        // 無法 geocode，改用城市名稱直接查 forecast（預設國家為台灣）
+        resolvedCity = city;
+      } else {
+        resolvedLat = geo.lat;
+        resolvedLon = geo.lon;
+        resolvedCity = geo.name;
       }
-      resolvedLat = geo.lat;
-      resolvedLon = geo.lon;
-      resolvedCity = geo.name;
     }
 
-    const forecastUrl = `https://api.openweathermap.org/data/2.5/forecast?lat=${resolvedLat}&lon=${resolvedLon}&units=metric&lang=zh_tw&appid=${apiKey}`;
+    const forecastUrl =
+      resolvedLat && resolvedLon
+        ? `https://api.openweathermap.org/data/2.5/forecast?lat=${resolvedLat}&lon=${resolvedLon}&units=metric&lang=zh_tw&appid=${apiKey}`
+        : `https://api.openweathermap.org/data/2.5/forecast?q=${encodeURIComponent(
+            `${resolvedCity},TW`
+          )}&units=metric&lang=zh_tw&appid=${apiKey}`;
     const res = await fetch(forecastUrl);
     if (!res.ok) {
       const text = await res.text();
@@ -322,8 +332,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           userMessage.startsWith("kevinbot") ||
           userMessage.startsWith("Kevin") ||
           userMessage.startsWith("kevin") ||
-          userMessage.startsWith("文哥") ||
-          userMessage.startsWith("周真豬");
+          userMessage.startsWith("文哥");
 
         if (!mentionedBot && !calledByName) {
           // 沒真的 @，也沒有以名字開頭 → 不回應
