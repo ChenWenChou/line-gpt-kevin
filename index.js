@@ -273,15 +273,31 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
       const userMessage = event.message.text.trim();
 
-      // ② 群組模式：只有被 @ 才回
-      if (event.source.type === "group") {
+      // ② 群組 / 房間模式：只有「真的 @」或「叫名字開頭」才回
+      if (event.source.type === "group" || event.source.type === "room") {
         const mention = event.message?.mention;
-        if (!mention || !mention.mentionees) continue;
 
-        const mentionedBot = mention.mentionees.some(
-          (m) => m.userId === BOT_USER_ID
-        );
-        if (!mentionedBot) continue;
+        const mentionedBot =
+          mention &&
+          Array.isArray(mention.mentionees) &&
+          mention.mentionees.some((m) => m.userId === BOT_USER_ID);
+
+        // 用文字叫名字也算，比如：
+        // @KevinBot 桃園 明天天氣
+        // KevinBot 桃園 明天天氣
+        const calledByName =
+          userMessage.startsWith("@KevinBot") ||
+          userMessage.startsWith("KevinBot") ||
+          userMessage.startsWith("kevinbot") ||
+          userMessage.startsWith("Kevin") ||
+          userMessage.startsWith("kevin") ||
+          userMessage.startsWith("文哥") ||
+          userMessage.startsWith("周真豬");
+
+        if (!mentionedBot && !calledByName) {
+          // 沒真的 @，也沒有以名字開頭 → 不回應
+          continue;
+        }
       }
 
       // ③ 用 GPT 判斷是不是在問天氣 / 穿搭
