@@ -583,7 +583,7 @@ async function getWeatherAndOutfit({
       ? `${address}（座標）`
       : resolvedCity || city || "未命名地點";
     const whenLabel = WHEN_LABEL[when] || WHEN_LABEL.today;
-    const outfit = buildOutfitAdvice(temp, feels, pop);
+    const outfit = buildOutfitAdvice(temp, feels, maxPop);
     const maxMinText =
       maxTemp !== null
         ? `最高溫：${maxTemp.toFixed(1)}°C\n最低溫：${minTemp.toFixed(1)}°C\n`
