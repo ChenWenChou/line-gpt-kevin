@@ -461,10 +461,24 @@ async function getWeatherAndOutfit({
     const dayIndex = when === "tomorrow" ? 1 : when === "day_after" ? 2 : 0;
 
     const offsetSec = data.city?.timezone ?? 0;
-    const now = Date.now();
-    const targetDateStr = new Date(now + dayIndex * 24 * 60 * 60 * 1000)
-      .toISOString()
-      .slice(0, 10);
+    const offsetMs = (data.city?.timezone ?? 0) * 1000;
+
+    // 用「當地現在時間」
+    const localNow = new Date(Date.now() + offsetMs);
+
+    // 取得當地今天 00:00
+    const localToday = new Date(
+      localNow.getFullYear(),
+      localNow.getMonth(),
+      localNow.getDate()
+    );
+
+    // 再加 dayIndex
+    const targetDate = new Date(
+      localToday.getTime() + dayIndex * 24 * 60 * 60 * 1000
+    );
+
+    const targetDateStr = targetDate.toISOString().slice(0, 10);
 
     const pickSlot = (list) => {
       const sameDay = list.filter((item) => {
@@ -628,7 +642,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       if (event.message.type === "location") {
         const { address, latitude, longitude } = event.message;
 
-       const result = await getWeatherAndOutfit({
+        const result = await getWeatherAndOutfit({
           lat: latitude,
           lon: longitude,
           address,
