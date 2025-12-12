@@ -520,6 +520,17 @@ async function getWeatherAndOutfit({
       return local === targetDateStr;
     });
 
+    // ✅ 計算「當日最高降雨機率」
+    let maxPop = 0;
+
+    if (sameDayEntries.length > 0) {
+      maxPop = Math.max(
+        ...sameDayEntries.map((i) => (typeof i.pop === "number" ? i.pop : 0))
+      );
+    }
+
+    const rainPercent = Math.round(maxPop * 100);
+
     // 如果找到同日資料 → 計算 max / min
     let maxTemp = null;
     let minTemp = null;
@@ -567,8 +578,6 @@ async function getWeatherAndOutfit({
 
     const humidity = slot.main?.humidity ?? "NA";
     const desc = slot.weather?.[0]?.description || "未知";
-    const pop = typeof slot.pop === "number" ? slot.pop : 0;
-    const rainPercent = Math.round(pop * 100);
     const rainText = `降雨機率：${rainPercent}%`;
     const locationLabel = address
       ? `${address}（座標）`
