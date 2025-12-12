@@ -461,21 +461,29 @@ async function getWeatherAndOutfit({
     }
 
     const data = await res.json();
+
+    // ================================
+    // ✅ 用 forecast 第一筆當「今天」
+    // ================================
+    const offsetSec = data.city?.timezone ?? 0;
+
+    // local date helper（只保留這一個）
+    function getLocalDateString(dt, offsetSec) {
+      const d = new Date((dt + offsetSec) * 1000);
+      return d.toISOString().slice(0, 10);
+    }
+
+    const firstItem = data.list?.[0];
+    if (!firstItem) {
+      return "暫時查不到天氣資料，請稍後再試。";
+    }
+
+    const baseDateStr = getLocalDateString(firstItem.dt, offsetSec);
+
     const dayIndex = when === "tomorrow" ? 1 : when === "day_after" ? 2 : 0;
 
-    const offsetSec = data.city?.timezone ?? 0;
-    const nowLocal = new Date((Date.now() / 1000 + offsetSec) * 1000);
-    const todayLocal = new Date(
-      Date.UTC(
-        nowLocal.getUTCFullYear(),
-        nowLocal.getUTCMonth(),
-        nowLocal.getUTCDate()
-      )
-    );
-
-    const targetDate = new Date(
-      todayLocal.getTime() + dayIndex * 24 * 60 * 60 * 1000
-    );
+    const targetDate = new Date(baseDateStr);
+    targetDate.setDate(targetDate.getDate() + dayIndex);
     const targetDateStr = targetDate.toISOString().slice(0, 10);
 
     const pickSlot = (list) => {
@@ -484,7 +492,10 @@ async function getWeatherAndOutfit({
         return local === targetDateStr;
       });
 
-      if (sameDay.length === 0) return null;
+      if (sameDay.length === 0) {
+        // 👉 fallback：用 forecast 第一筆
+        return list[0] || null;
+      }
 
       // ✅ 改成「距離中午最近的一筆」
       const targetHour = 12;
@@ -503,15 +514,6 @@ async function getWeatherAndOutfit({
     };
 
     const slot = pickSlot(data.list || []);
-
-    // --- 計算當日最高 / 最低溫 ---
-    function getLocalDateString(dt, offsetSec) {
-      const d = new Date((dt + offsetSec) * 1000);
-      const y = d.getUTCFullYear();
-      const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-      const day = String(d.getUTCDate()).padStart(2, "0");
-      return `${y}-${m}-${day}`;
-    }
 
     const sameDayEntries = (data.list || []).filter((item) => {
       const local = getLocalDateString(item.dt, offsetSec);
