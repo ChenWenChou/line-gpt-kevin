@@ -223,6 +223,82 @@ function findTaiwanIsland(raw) {
   return null;
 }
 
+function buildWeatherFlex({
+  city,
+  whenLabel,
+  desc,
+  minTemp,
+  maxTemp,
+  feels,
+  humidity,
+  rainPercent,
+  outfitText,
+}) {
+  return {
+    type: "flex",
+    altText: `${city}${whenLabel}天氣`,
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        contents: [
+          {
+            type: "text",
+            text: `🌦 ${city}｜${whenLabel}天氣`,
+            weight: "bold",
+            size: "lg",
+          },
+          {
+            type: "text",
+            text: desc,
+            size: "md",
+            color: "#666666",
+          },
+          {
+            type: "separator",
+          },
+          {
+            type: "box",
+            layout: "vertical",
+            spacing: "sm",
+            contents: [
+              {
+                type: "text",
+                text: `🌡 ${minTemp}°C ～ ${maxTemp}°C（體感 ${feels}°C）`,
+              },
+              {
+                type: "text",
+                text: `💧 濕度 ${humidity}%`,
+              },
+              {
+                type: "text",
+                text: `☔ 降雨機率 ${rainPercent}%`,
+              },
+            ],
+          },
+          {
+            type: "separator",
+          },
+          {
+            type: "text",
+            text: "【穿搭建議】",
+            weight: "bold",
+          },
+          {
+            type: "text",
+            text: outfitText,
+            wrap: true,
+            size: "sm",
+          },
+        ],
+      },
+    },
+  };
+}
+
 async function geocodeCity(city, apiKey) {
   const c = city.trim();
 
@@ -466,7 +542,7 @@ async function getWeatherAndOutfit({
         ? `最高溫：${maxTemp.toFixed(1)}°C\n最低溫：${minTemp.toFixed(1)}°C\n`
         : "";
 
-    return (
+    const weatherText =
       `【${locationLabel}｜${whenLabel}天氣】\n` +
       `狀態：${desc}\n` +
       tempRangeText +
@@ -474,8 +550,22 @@ async function getWeatherAndOutfit({
       `濕度：${humidity}%\n` +
       `${rainText}\n\n` +
       `【穿搭建議】\n` +
-      outfit
-    );
+      outfit;
+
+    return {
+      text: weatherText,
+      data: {
+        city: locationLabel,
+        whenLabel,
+        desc,
+        minTemp: minTemp?.toFixed(1),
+        maxTemp: maxTemp?.toFixed(1),
+        feels: feels?.toFixed(1),
+        humidity,
+        rainPercent,
+        outfitText: outfit,
+      },
+    };
   } catch (err) {
     console.error("Weather fetch error:", err);
     return "查天氣時發生例外錯誤，等等再試一次。";
@@ -489,190 +579,168 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
     try {
       if (event.type !== "message") continue;
 
-      // ① 使用者分享定位 → 直接查天氣
-      if (event.message.type === "location") {
-        const { address, latitude, longitude } = event.message;
-        const info = await getWeatherAndOutfit({
-          lat: latitude,
-          lon: longitude,
-          address,
-          when: "today",
-        });
-
-        // ✅ 記住這個使用者最後查的地點
-        userLastWeatherContext.set(event.source.userId, {
-          city: address,
-          lat: latitude,
-          lon: longitude,
-        });
-
-        await client.replyMessage(event.replyToken, {
-          type: "text",
-          text: info,
-        });
-        continue;
-      }
-
-      if (event.message.type !== "text") continue;
-
-      const userMessage = event.message.text.trim();
-
-      // ② 群組 / 房間模式：只有「真的 @」或「叫名字開頭」才回
+      // ─────────────────────────────────────
+      // 0️⃣ 群組 / 房間 gate（最外層）
+      // ─────────────────────────────────────
       if (event.source.type === "group" || event.source.type === "room") {
         const mention = event.message?.mention;
+        const mentionedBot = mention?.mentionees?.some(
+          (m) => m.userId === BOT_USER_ID
+        );
 
-        const mentionedBot =
-          mention &&
-          Array.isArray(mention.mentionees) &&
-          mention.mentionees.some((m) => m.userId === BOT_USER_ID);
+        const userMessage =
+          event.message.type === "text" ? event.message.text.trim() : "";
 
-        // 用文字叫名字也算，比如：
-        // @KevinBot 桃園 明天天氣
-        // KevinBot 桃園 明天天氣
         const calledByName =
           userMessage.startsWith("@KevinBot") ||
           userMessage.startsWith("KevinBot") ||
           userMessage.startsWith("kevinbot") ||
           userMessage.startsWith("助理");
 
-        if (!mentionedBot && !calledByName) {
-          // 沒真的 @，也沒有以名字開頭 → 不回應
-          continue;
-        }
+        if (!mentionedBot && !calledByName) continue;
       }
 
-      // 🅲 快速天氣判斷（不用 GPT）
-      const quick = quickWeatherParse(userMessage);
+      // ─────────────────────────────────────
+      // 1️⃣ location message（最高優先）
+      // ─────────────────────────────────────
+      if (event.message.type === "location") {
+        const { address, latitude, longitude } = event.message;
 
-      if (quick) {
-        const cityClean = cleanCity(
-          quick.city || userLastWeatherContext.get(event.source.userId)?.city
-        );
-        const island = findTaiwanIsland(cityClean);
-        const city = island ? island.name : fixTaiwanCity(cityClean);
-
-        const info = await getWeatherAndOutfit({
-          city,
-          when: quick.when,
-          lat: island?.lat,
-          lon: island?.lon,
+       const result = await getWeatherAndOutfit({
+          lat: latitude,
+          lon: longitude,
+          address,
+          when: "today",
         });
 
-        // ✅ 記憶使用者查詢
         userLastWeatherContext.set(event.source.userId, {
-          city,
-          lat: island?.lat,
-          lon: island?.lon,
+          city: address,
+          lat: latitude,
+          lon: longitude,
         });
 
-        await client.replyMessage(event.replyToken, {
-          type: "text",
-          text: info,
-        });
+        await client.replyMessage(event.replyToken, [
+          buildWeatherFlex(result.data),
+          { type: "text", text: result.text },
+        ]);
         continue;
       }
 
-      // ③ 用 GPT 判斷是不是在問天氣 / 穿搭
-      const intent = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `
-你是一個意圖判斷與解析器。
+      if (event.message.type !== "text") continue;
+      const userMessage = event.message.text.trim();
+      const userId = event.source.userId;
 
-【地點判斷規則】
-1. 使用者提到的台灣城市（台北、台中、桃園、新竹、嘉義、台南、高雄、花蓮、宜蘭、馬祖、金門、澎湖、南竿、北竿、東引等）一律視為台灣的城市或離島。
-2. 如果只講「台中」「台南」「台北」這類簡稱，也必須自動解析為「台灣台中市」「台灣台南市」「台灣台北市」。
-3. 除非使用者明確說「中國的 XXX」，否則地點預設為台灣。
-4. 如果使用者提到「國家 + 城市」如「日本大阪」「韓國首爾」「美國紐約」，直接視為該國城市。
-5. 如果只講國際城市（如大阪、東京、紐約、巴黎等），推論最常見的國家（大阪→日本）。
+      // ─────────────────────────────────────
+      // 2️⃣ 只有時間（那明天呢 / 後天）
+      // ─────────────────────────────────────
+      const onlyWhen = /^(那)?(今天|明天|後天)(呢|啊)?$/.test(userMessage);
 
-【意圖規則】
-如果訊息是在問天氣、氣溫、下雨、冷不冷、穿什麼，請回：
-WEATHER|城市名稱（英文名）|when
-
-when 僅能是 today / tomorrow / day_after
-（使用者問「明天」就回 tomorrow，「後天」就回 day_after）
-
-其他請回：
-NO
-            `,
-          },
-          { role: "user", content: userMessage },
-        ],
-      });
-
-      const intentText = intent.choices[0].message.content?.trim?.() ?? "NO";
-
-      if (intentText.startsWith("WEATHER")) {
-        const userId = event.source.userId;
+      if (onlyWhen) {
         const last = userLastWeatherContext.get(userId);
-        const isOnlyWhenQuestion = /^(那)?(今天|明天|後天)/.test(userMessage);
-        // 🧠 只有時間，但有上一次地點 → 自動補齊
-        if (!cityRaw && last && isOnlyWhenQuestion) {
+        if (last) {
           const when = normalizeWhen(userMessage);
 
-          const info = await getWeatherAndOutfit({
+          const result = await getWeatherAndOutfit({
             city: last.city,
             when,
             lat: last.lat,
             lon: last.lon,
           });
 
-          await client.replyMessage(event.replyToken, {
-            type: "text",
-            text: info,
-          });
+          await client.replyMessage(event.replyToken, [
+            buildWeatherFlex(result.data),
+            { type: "text", text: result.text },
+          ]);
           continue;
         }
+      }
 
-        const [, cityRaw, whenRaw] = intentText.split("|");
-        const when = normalizeWhen(whenRaw || "today");
+      // ─────────────────────────────────────
+      // 3️⃣ quickWeatherParse（不用 GPT）
+      // ─────────────────────────────────────
+      const quick = quickWeatherParse(userMessage);
 
-        // ✅ 台灣地點：完全不用 GPT / Geo API
-        if (isTaiwanLocation(cityRaw)) {
-          const cityClean = cleanCity(cityRaw);
-          const island = findTaiwanIsland(cityClean);
+      if (quick) {
+        const cityClean = cleanCity(
+          quick.city || userLastWeatherContext.get(userId)?.city
+        );
+        const island = findTaiwanIsland(cityClean);
+        const city = island ? island.name : fixTaiwanCity(cityClean);
 
-          const info = await getWeatherAndOutfit({
-            city: island ? island.name : fixTaiwanCity(cityClean),
-            when,
-            lat: island?.lat,
-            lon: island?.lon,
-          });
-
-          await client.replyMessage(event.replyToken, {
-            type: "text",
-            text: info,
-          });
-          continue;
-        }
-
-        // 🌍 非台灣才走原本流程
-        const cityClean = cleanCity(cityRaw || "");
-        const info = await getWeatherAndOutfit({
-          city: cityClean,
-          when,
+        const result = await getWeatherAndOutfit({
+          city,
+          when: quick.when,
+          lat: island?.lat,
+          lon: island?.lon,
         });
 
-        await client.replyMessage(event.replyToken, {
-          type: "text",
-          text: info,
+        userLastWeatherContext.set(userId, {
+          city,
+          lat: island?.lat,
+          lon: island?.lon,
         });
+
+        await client.replyMessage(event.replyToken, [
+          buildWeatherFlex(result.data),
+          { type: "text", text: result.text },
+        ]);
         continue;
       }
 
-      // ④ 一般聊天 → GPT 回覆
+      // ─────────────────────────────────────
+      // 4️⃣ GPT WEATHER intent
+      // ─────────────────────────────────────
+      const intent = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是一個意圖判斷與解析器。【地點判斷規則】1. 使用者提到的台灣城市（台北、台中、桃園、新竹、嘉義、台南、高雄、花蓮、宜蘭、馬祖、金門、澎湖、南竿、北竿、東引等）一律視為台灣的城市或離島。2. 如果只講「台中」「台南」「台北」這類簡稱，也必須自動解析為「台灣台中市」「台灣台南市」「台灣台北市」。3. 除非使用者明確說「中國的 XXX」，否則地點預設為台灣。4. 如果使用者提到「國家 + 城市」如「日本大阪」「韓國首爾」「美國紐約」，直接視為該國城市。5. 如果只講國際城市（如大阪、東京、紐約、巴黎等），推論最常見的國家（大阪→日本）。【意圖規則】如果訊息是在問天氣、氣溫、下雨、冷不冷、穿什麼，請回：WEATHER|城市名稱（英文名）|whenwhen 僅能是 today / tomorrow / day_after（使用者問「明天」就回 tomorrow，「後天」就回 day_after）其他請回：NO",
+          },
+          { role: "user", content: userMessage },
+        ],
+      });
+
+      const intentText = intent.choices[0].message.content?.trim() ?? "NO";
+
+      if (intentText.startsWith("WEATHER")) {
+        const [, cityRaw, whenRaw] = intentText.split("|");
+        const when = normalizeWhen(whenRaw || "today");
+
+        const cityClean = cleanCity(cityRaw);
+        const island = findTaiwanIsland(cityClean);
+
+        const result = await getWeatherAndOutfit({
+          city: island ? island.name : fixTaiwanCity(cityClean),
+          when,
+          lat: island?.lat,
+          lon: island?.lon,
+        });
+
+        userLastWeatherContext.set(userId, {
+          city: island ? island.name : cityClean,
+          lat: island?.lat,
+          lon: island?.lon,
+        });
+
+        await client.replyMessage(event.replyToken, [
+          buildWeatherFlex(result.data),
+          { type: "text", text: result.text },
+        ]);
+        continue;
+      }
+
+      // ─────────────────────────────────────
+      // 5️⃣ 一般聊天 GPT
+      // ─────────────────────────────────────
       const reply = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
-            content: `
-你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。
-你是 Kevin 自己架在 Vercel 上的 LINE Bot，由 OpenAI API 驅動。
-            `,
+            content:
+              "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot，由 OpenAI API 驅動。",
           },
           { role: "user", content: userMessage },
         ],
@@ -684,7 +752,6 @@ NO
       });
     } catch (err) {
       console.error("Error handling event:", err);
-      // 失敗也回 200，避免 LINE 一直重送
     }
   }
 
