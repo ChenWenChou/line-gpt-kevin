@@ -66,6 +66,7 @@ function quickWeatherParse(text) {
   const isWeather = /(天氣|氣溫|下雨|冷不冷|熱不熱|會不會下雨)/.test(t);
 
   if (!isWeather) return null;
+  if (!cityMatch) return null;
 
   return {
     city: cityMatch?.[1],
