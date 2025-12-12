@@ -464,16 +464,17 @@ async function getWeatherAndOutfit({
     const dayIndex = when === "tomorrow" ? 1 : when === "day_after" ? 2 : 0;
 
     const offsetSec = data.city?.timezone ?? 0;
-    const nowUtc = new Date();
-    const todayUtc = new Date(
+    const nowLocal = new Date((Date.now() / 1000 + offsetSec) * 1000);
+    const todayLocal = new Date(
       Date.UTC(
-        nowUtc.getUTCFullYear(),
-        nowUtc.getUTCMonth(),
-        nowUtc.getUTCDate()
+        nowLocal.getUTCFullYear(),
+        nowLocal.getUTCMonth(),
+        nowLocal.getUTCDate()
       )
     );
+
     const targetDate = new Date(
-      todayUtc.getTime() + dayIndex * 24 * 60 * 60 * 1000
+      todayLocal.getTime() + dayIndex * 24 * 60 * 60 * 1000
     );
     const targetDateStr = targetDate.toISOString().slice(0, 10);
 
@@ -519,11 +520,6 @@ async function getWeatherAndOutfit({
     let maxFeels = null;
     let minFeels = null;
 
-    // ✅ 防 undefined 保命線（給 Flex 用）
-    const safeMin = minTemp != null ? minTemp.toFixed(1) : "--";
-    const safeMax = maxTemp != null ? maxTemp.toFixed(1) : "--";
-    const safeFeels = feels != null ? feels.toFixed(1) : "--";
-
     if (sameDayEntries.length > 0) {
       const feels = sameDayEntries
         .map((i) => i.main?.feels_like)
@@ -549,6 +545,13 @@ async function getWeatherAndOutfit({
 
     const temp = slot.main?.temp;
     const feels = slot.main?.feels_like ?? temp;
+
+    const safeMin =
+      minTemp != null ? minTemp.toFixed(1) : temp?.toFixed(1) ?? "--";
+    const safeMax =
+      maxTemp != null ? maxTemp.toFixed(1) : temp?.toFixed(1) ?? "--";
+    const safeFeels = feels != null ? feels.toFixed(1) : "--";
+
     const humidity = slot.main?.humidity ?? "NA";
     const desc = slot.weather?.[0]?.description || "未知";
     const pop = typeof slot.pop === "number" ? slot.pop : 0;
@@ -607,6 +610,7 @@ async function replyWeather(replyToken, result) {
   // 嘗試送 Flex
   try {
     await client.replyMessage(replyToken, buildWeatherFlex(result.data));
+    return;
   } catch (err) {
     console.error("Flex 回傳失敗，fallback 文字", err);
     await client.replyMessage(replyToken, {
