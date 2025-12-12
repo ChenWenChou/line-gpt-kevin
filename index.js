@@ -486,9 +486,20 @@ async function getWeatherAndOutfit({
 
       if (sameDay.length === 0) return null;
 
-      return (
-        sameDay.find((item) => item.dt_txt?.includes("12:00:00")) || sameDay[0]
-      );
+      // ✅ 改成「距離中午最近的一筆」
+      const targetHour = 12;
+
+      return sameDay.reduce((closest, curr) => {
+        const currHour = new Date((curr.dt + offsetSec) * 1000).getUTCHours();
+        const closestHour = new Date(
+          (closest.dt + offsetSec) * 1000
+        ).getUTCHours();
+
+        return Math.abs(currHour - targetHour) <
+          Math.abs(closestHour - targetHour)
+          ? curr
+          : closest;
+      }, sameDay[0]);
     };
 
     const slot = pickSlot(data.list || []);
