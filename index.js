@@ -41,11 +41,36 @@ const TW_CITY_MAP = {
   台東: "Taitung",
   臺東: "Taitung",
 };
+// 簡單記憶：userId -> { city, lat, lon }
+const userLastWeatherContext = new Map();
 
 function isTaiwanLocation(raw = "") {
   return /(台灣|臺灣|台湾|台北|臺北|新北|台中|臺中|台南|臺南|高雄|桃園|新竹|嘉義|宜蘭|花蓮|台東|臺東|澎湖|金門|馬祖|南竿|北竿|東引)/.test(
     raw
   );
+}
+
+function quickWeatherParse(text) {
+  const t = text.trim();
+
+  const when = t.includes("後天")
+    ? "day_after"
+    : t.includes("明天")
+    ? "tomorrow"
+    : "today";
+
+  const cityMatch = t.match(
+    /(台北|臺北|新北|台中|臺中|台南|臺南|高雄|桃園|新竹|嘉義|宜蘭|花蓮|台東|臺東|南竿|北竿|東引|馬祖|金門|澎湖)/
+  );
+
+  const isWeather = /(天氣|氣溫|下雨|冷不冷|熱不熱|會不會下雨)/.test(t);
+
+  if (!isWeather) return null;
+
+  return {
+    city: cityMatch?.[1],
+    when,
+  };
 }
 
 function cleanCity(raw) {
@@ -474,6 +499,13 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           when: "today",
         });
 
+        // ✅ 記住這個使用者最後查的地點
+        userLastWeatherContext.set(event.source.userId, {
+          city: address,
+          lat: latitude,
+          lon: longitude,
+        });
+
         await client.replyMessage(event.replyToken, {
           type: "text",
           text: info,
@@ -501,12 +533,43 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           userMessage.startsWith("@KevinBot") ||
           userMessage.startsWith("KevinBot") ||
           userMessage.startsWith("kevinbot") ||
-          userMessage.startsWith("文哥");
+          userMessage.startsWith("助理");
 
         if (!mentionedBot && !calledByName) {
           // 沒真的 @，也沒有以名字開頭 → 不回應
           continue;
         }
+      }
+
+      // 🅲 快速天氣判斷（不用 GPT）
+      const quick = quickWeatherParse(userMessage);
+
+      if (quick) {
+        const cityClean = cleanCity(
+          quick.city || userLastWeatherContext.get(event.source.userId)?.city
+        );
+        const island = findTaiwanIsland(cityClean);
+        const city = island ? island.name : fixTaiwanCity(cityClean);
+
+        const info = await getWeatherAndOutfit({
+          city,
+          when: quick.when,
+          lat: island?.lat,
+          lon: island?.lon,
+        });
+
+        // ✅ 記憶使用者查詢
+        userLastWeatherContext.set(event.source.userId, {
+          city,
+          lat: island?.lat,
+          lon: island?.lon,
+        });
+
+        await client.replyMessage(event.replyToken, {
+          type: "text",
+          text: info,
+        });
+        continue;
       }
 
       // ③ 用 GPT 判斷是不是在問天氣 / 穿搭
@@ -543,6 +606,27 @@ NO
       const intentText = intent.choices[0].message.content?.trim?.() ?? "NO";
 
       if (intentText.startsWith("WEATHER")) {
+        const userId = event.source.userId;
+        const last = userLastWeatherContext.get(userId);
+        const isOnlyWhenQuestion = /^(那)?(今天|明天|後天)/.test(userMessage);
+        // 🧠 只有時間，但有上一次地點 → 自動補齊
+        if (!cityRaw && last && isOnlyWhenQuestion) {
+          const when = normalizeWhen(userMessage);
+
+          const info = await getWeatherAndOutfit({
+            city: last.city,
+            when,
+            lat: last.lat,
+            lon: last.lon,
+          });
+
+          await client.replyMessage(event.replyToken, {
+            type: "text",
+            text: info,
+          });
+          continue;
+        }
+
         const [, cityRaw, whenRaw] = intentText.split("|");
         const when = normalizeWhen(whenRaw || "today");
 
