@@ -491,10 +491,16 @@ async function getWeatherAndOutfit({
     const slot = pickSlot(data.list || []);
 
     // --- 計算當日最高 / 最低溫 ---
+    function getLocalDateString(dt, offsetSec) {
+      const d = new Date((dt + offsetSec) * 1000);
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(d.getUTCDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    }
+
     const sameDayEntries = (data.list || []).filter((item) => {
-      const local = new Date((item.dt + offsetSec) * 1000)
-        .toISOString()
-        .slice(0, 10);
+      const local = getLocalDateString(item.dt, offsetSec);
       return local === targetDateStr;
     });
 
