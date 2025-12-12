@@ -572,6 +572,28 @@ async function getWeatherAndOutfit({
   }
 }
 
+async function replyWeather(replyToken, result) {
+  // 如果整個 result 就是錯誤字串 → 直接回文字
+  if (!result || typeof result === "string" || !result.data) {
+    await client.replyMessage(replyToken, {
+      type: "text",
+      text: typeof result === "string" ? result : "天氣資料取得失敗",
+    });
+    return;
+  }
+
+  // 嘗試送 Flex
+  try {
+    await client.replyMessage(replyToken, buildWeatherFlex(result.data));
+  } catch (err) {
+    console.error("Flex 回傳失敗，fallback 文字", err);
+    await client.replyMessage(replyToken, {
+      type: "text",
+      text: result.text,
+    });
+  }
+}
+
 app.post("/webhook", line.middleware(config), async (req, res) => {
   const events = req.body.events || [];
 
@@ -619,10 +641,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           lon: longitude,
         });
 
-        await client.replyMessage(event.replyToken, [
-          buildWeatherFlex(result.data),
-          { type: "text", text: result.text },
-        ]);
+        await replyWeather(event.replyToken, result);
         continue;
       }
 
@@ -647,10 +666,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             lon: last.lon,
           });
 
-          await client.replyMessage(event.replyToken, [
-            buildWeatherFlex(result.data),
-            { type: "text", text: result.text },
-          ]);
+          await replyWeather(event.replyToken, result);
           continue;
         }
       }
@@ -680,10 +696,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           lon: island?.lon,
         });
 
-        await client.replyMessage(event.replyToken, [
-          buildWeatherFlex(result.data),
-          { type: "text", text: result.text },
-        ]);
+        await replyWeather(event.replyToken, result);
         continue;
       }
 
@@ -724,10 +737,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           lon: island?.lon,
         });
 
-        await client.replyMessage(event.replyToken, [
-          buildWeatherFlex(result.data),
-          { type: "text", text: result.text },
-        ]);
+        await replyWeather(event.replyToken, result);
         continue;
       }
 
