@@ -122,11 +122,11 @@ function fixTaiwanCity(raw) {
 }
 
 function normalizeWhen(raw = "today") {
-  const text = raw.toLowerCase();
-  if (["tomorrow", "明天", "明日"].includes(text)) return "tomorrow";
-  if (["day_after", "後天", "day after", "day-after", "後日"].includes(text)) {
-    return "day_after";
-  }
+  const text = String(raw).toLowerCase();
+
+  if (text.includes("後天")) return "day_after";
+  if (text.includes("明天") || text.includes("明日")) return "tomorrow";
+
   return "today";
 }
 
@@ -423,6 +423,8 @@ async function getWeatherAndOutfit({
     let resolvedCity = city;
     let resolvedLat = lat;
     let resolvedLon = lon;
+
+    const isTW = isTaiwanLocation(resolvedCity);
 
     // 台灣離島先用人工座標
     const island = findTaiwanIsland(resolvedCity);
