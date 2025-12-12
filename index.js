@@ -464,30 +464,22 @@ async function getWeatherAndOutfit({
     const dayIndex = when === "tomorrow" ? 1 : when === "day_after" ? 2 : 0;
 
     const offsetSec = data.city?.timezone ?? 0;
-    const offsetMs = (data.city?.timezone ?? 0) * 1000;
-
-    // 用「當地現在時間」
-    const localNow = new Date(Date.now() + offsetMs);
-
-    // 取得當地今天 00:00
-    const localToday = new Date(
-      localNow.getFullYear(),
-      localNow.getMonth(),
-      localNow.getDate()
+    const nowUtc = new Date();
+    const todayUtc = new Date(
+      Date.UTC(
+        nowUtc.getUTCFullYear(),
+        nowUtc.getUTCMonth(),
+        nowUtc.getUTCDate()
+      )
     );
-
-    // 再加 dayIndex
     const targetDate = new Date(
-      localToday.getTime() + dayIndex * 24 * 60 * 60 * 1000
+      todayUtc.getTime() + dayIndex * 24 * 60 * 60 * 1000
     );
-
     const targetDateStr = targetDate.toISOString().slice(0, 10);
 
     const pickSlot = (list) => {
       const sameDay = list.filter((item) => {
-        const local = new Date((item.dt + offsetSec) * 1000)
-          .toISOString()
-          .slice(0, 10);
+        const local = new Date(item.dt * 1000).toISOString().slice(0, 10);
         return local === targetDateStr;
       });
       if (sameDay.length === 0) return null;
