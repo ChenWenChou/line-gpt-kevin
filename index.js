@@ -479,13 +479,15 @@ async function getWeatherAndOutfit({
 
     const pickSlot = (list) => {
       const sameDay = list.filter((item) => {
-        const local = new Date(item.dt * 1000).toISOString().slice(0, 10);
+        const local = getLocalDateString(item.dt, offsetSec);
         return local === targetDateStr;
       });
+
       if (sameDay.length === 0) return null;
-      const noon =
-        sameDay.find((item) => item.dt_txt?.includes("12:00:00")) || sameDay[0];
-      return noon;
+
+      return (
+        sameDay.find((item) => item.dt_txt?.includes("12:00:00")) || sameDay[0]
+      );
     };
 
     const slot = pickSlot(data.list || []);
@@ -516,6 +518,11 @@ async function getWeatherAndOutfit({
     // --- 計算體感溫度區間 ---
     let maxFeels = null;
     let minFeels = null;
+
+    // ✅ 防 undefined 保命線（給 Flex 用）
+    const safeMin = minTemp != null ? minTemp.toFixed(1) : "--";
+    const safeMax = maxTemp != null ? maxTemp.toFixed(1) : "--";
+    const safeFeels = feels != null ? feels.toFixed(1) : "--";
 
     if (sameDayEntries.length > 0) {
       const feels = sameDayEntries
@@ -573,9 +580,9 @@ async function getWeatherAndOutfit({
         city: locationLabel,
         whenLabel,
         desc,
-        minTemp: minTemp?.toFixed(1),
-        maxTemp: maxTemp?.toFixed(1),
-        feels: feels?.toFixed(1),
+        minTemp: safeMin,
+        maxTemp: safeMax,
+        feels: safeFeels,
         humidity,
         rainPercent,
         outfitText: outfit,
