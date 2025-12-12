@@ -448,7 +448,7 @@ async function getWeatherAndOutfit({
       resolvedLat && resolvedLon
         ? `https://api.openweathermap.org/data/2.5/forecast?lat=${resolvedLat}&lon=${resolvedLon}&units=metric&lang=zh_tw&appid=${apiKey}`
         : `https://api.openweathermap.org/data/2.5/forecast?q=${encodeURIComponent(
-            `${resolvedCity},TW`
+            isTW ? `${resolvedCity},TW` : resolvedCity
           )}&units=metric&lang=zh_tw&appid=${apiKey}`;
     const res = await fetch(forecastUrl);
     if (!res.ok) {
