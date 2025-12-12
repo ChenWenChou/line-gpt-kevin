@@ -42,6 +42,12 @@ const TW_CITY_MAP = {
   臺東: "Taitung",
 };
 
+function isTaiwanLocation(raw = "") {
+  return /(台灣|臺灣|台湾|台北|臺北|新北|台中|臺中|台南|臺南|高雄|桃園|新竹|嘉義|宜蘭|花蓮|台東|臺東|澎湖|金門|馬祖|南竿|北竿|東引)/.test(
+    raw
+  );
+}
+
 function cleanCity(raw) {
   if (!raw) return raw;
 
@@ -507,9 +513,9 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       const intent = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
-        {
-          role: "system",
-          content: `
+          {
+            role: "system",
+            content: `
 你是一個意圖判斷與解析器。
 
 【地點判斷規則】
@@ -538,16 +544,32 @@ NO
 
       if (intentText.startsWith("WEATHER")) {
         const [, cityRaw, whenRaw] = intentText.split("|");
-        const cityClean = cleanCity(cityRaw || "Taipei");
-        const island = findTaiwanIsland(cityClean);
-        const city = island ? island.name : fixTaiwanCity(cityClean);
         const when = normalizeWhen(whenRaw || "today");
 
+        // ✅ 台灣地點：完全不用 GPT / Geo API
+        if (isTaiwanLocation(cityRaw)) {
+          const cityClean = cleanCity(cityRaw);
+          const island = findTaiwanIsland(cityClean);
+
+          const info = await getWeatherAndOutfit({
+            city: island ? island.name : fixTaiwanCity(cityClean),
+            when,
+            lat: island?.lat,
+            lon: island?.lon,
+          });
+
+          await client.replyMessage(event.replyToken, {
+            type: "text",
+            text: info,
+          });
+          continue;
+        }
+
+        // 🌍 非台灣才走原本流程
+        const cityClean = cleanCity(cityRaw || "");
         const info = await getWeatherAndOutfit({
-          city,
+          city: cityClean,
           when,
-          lat: island?.lat,
-          lon: island?.lon,
         });
 
         await client.replyMessage(event.replyToken, {
