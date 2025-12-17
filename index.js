@@ -1,6 +1,8 @@
 import express from "express";
 import line from "@line/bot-sdk";
 import OpenAI from "openai";
+// 求籤
+import mazuLots from "./mazu_lots.json" assert { type: "json" };
 
 const BOT_USER_ID = "U51d2392e43f851607a191adb3ec49b26";
 const app = express();
@@ -250,7 +252,6 @@ function buildWeatherFlex({
   rainPercent,
   outfitText,
 }) {
-  
   const imageUrl = pickWeatherImage(desc, rainPercent);
   return {
     type: "flex",
@@ -668,6 +669,89 @@ async function replyWeather(replyToken, result) {
   }
 }
 
+// 求籤方式
+function drawMazuLot() {
+  return mazuLots[Math.floor(Math.random() * mazuLots.length)];
+}
+
+function buildMazuLotFlex({ title, poem, advice }) {
+  return {
+    type: "flex",
+    altText: `媽祖靈籤｜${title}`,
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        contents: [
+          {
+            type: "text",
+            text: "🙏 媽祖靈籤",
+            weight: "bold",
+            size: "sm",
+            color: "#B71C1C",
+          },
+          {
+            type: "text",
+            text: title,
+            weight: "bold",
+            size: "xl",
+          },
+          { type: "separator" },
+
+          // 籤詩
+          ...poem.map((line) => ({
+            type: "text",
+            text: line,
+            size: "md",
+            wrap: true,
+          })),
+
+          { type: "separator" },
+
+          {
+            type: "text",
+            text: "【白話建議】",
+            weight: "bold",
+            margin: "md",
+          },
+          {
+            type: "text",
+            text: advice,
+            size: "sm",
+            wrap: true,
+            color: "#555555",
+          },
+        ],
+      },
+    },
+  };
+}
+
+async function explainLotPlain(poem) {
+  const text = poem.join(" ");
+
+  const res = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "你是一位理性溫和的文字解說者，請用口語白話解釋籤詩的『提醒方向』，避免預言、避免保證性語句，控制在 2~3 句。",
+      },
+      {
+        role: "user",
+        content: text,
+      },
+    ],
+    max_tokens: 120,
+  });
+
+  return res.choices[0].message.content.trim();
+}
+
 app.post("/webhook", line.middleware(config), async (req, res) => {
   const events = req.body.events || [];
 
@@ -722,6 +806,23 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       if (event.message.type !== "text") continue;
       const userMessage = event.message.text.trim();
       const userId = event.source.userId;
+
+      // ─────────────────────────────────────
+      // 🎴 媽祖抽籤指令
+      // ─────────────────────────────────────
+      if (/^(抽籤|求籤|媽祖指示)$/.test(userMessage)) {
+        const lot = drawMazuLot();
+        const advice = await explainLotPlain(lot.poem);
+
+        const flex = buildMazuLotFlex({
+          title: lot.title,
+          poem: lot.poem,
+          advice,
+        });
+
+        await client.replyMessage(event.replyToken, flex);
+        continue;
+      }
 
       // ─────────────────────────────────────
       // 2️⃣ 只有時間（那明天呢 / 後天）
