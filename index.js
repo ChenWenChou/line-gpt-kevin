@@ -5,7 +5,7 @@ import OpenAI from "openai";
 const BOT_USER_ID = "U51d2392e43f851607a191adb3ec49b26";
 const app = express();
 
-app.use(express.static("public"))
+app.use(express.static("public"));
 
 // LINE 設定
 const config = {
@@ -195,7 +195,6 @@ function buildOutfitAdvice(temp, feelsLike, rainProbability) {
     .join("\n");
 }
 
-
 // 台灣離島人工座標
 const TAIWAN_ISLANDS = {
   南竿: { lat: 26.1597, lon: 119.9519, name: "南竿（馬祖）" },
@@ -226,6 +225,19 @@ function findTaiwanIsland(raw) {
   }
   return null;
 }
+function pickWeatherImage(desc = "", rainPercent = 0) {
+  const d = desc.toLowerCase();
+
+  if (rainPercent >= 40 || d.includes("雨")) {
+    return "https://raw.githubusercontent.com/ChenWenChou/line-gpt-kevin/main/public/image/rain.png";
+  }
+
+  if (d.includes("晴")) {
+    return "https://raw.githubusercontent.com/ChenWenChou/line-gpt-kevin/main/public/image/sun.png";
+  }
+
+  return "https://raw.githubusercontent.com/ChenWenChou/line-gpt-kevin/main/public/image/cloud.png";
+}
 
 function buildWeatherFlex({
   city,
@@ -238,12 +250,23 @@ function buildWeatherFlex({
   rainPercent,
   outfitText,
 }) {
+  
+  const imageUrl = pickWeatherImage(desc, rainPercent);
   return {
     type: "flex",
     altText: `${city}${whenLabel}天氣`,
     contents: {
       type: "bubble",
       size: "mega",
+
+      // HERO IMAGE
+      hero: {
+        type: "image",
+        url: imageUrl,
+        size: "full",
+        aspectRatio: "20:13",
+        aspectMode: "cover",
+      },
       body: {
         type: "box",
         layout: "vertical",
