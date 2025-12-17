@@ -817,7 +817,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       // ─────────────────────────────────────
       // 🎴 媽祖抽籤指令
       // ─────────────────────────────────────
-      if (/^(抽籤|求籤|媽祖指示)$/.test(userMessage)) {
+      if (/(抽籤|求籤|媽祖指示)/.test(userMessage)) {
         const lot = drawMazuLot();
         const advice = await explainLotPlain(lot.poem);
 
