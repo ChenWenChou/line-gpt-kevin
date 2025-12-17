@@ -1,0 +1,662 @@
+[
+  {
+    "id": 1,
+    "title": "第一籤 甲子",
+    "poem": [
+      "日出便見風雲散",
+      "光明清淨照世間",
+      "一向前途通大道",
+      "萬事清吉保平安"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=1"
+  },
+  {
+    "id": 2,
+    "title": "第二籤 甲寅",
+    "poem": [
+      "於今此景正當時",
+      "看看欲吐百花魁",
+      "若能遇得春色到",
+      "一洒清吉脫塵埃"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=2"
+  },
+  {
+    "id": 3,
+    "title": "第三籤 甲辰",
+    "poem": [
+      "勸君把定心莫虛",
+      "天註衣祿自有餘",
+      "和合重重常吉慶",
+      "時來終遇得明珠"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=3"
+  },
+  {
+    "id": 4,
+    "title": "第四籤 甲午",
+    "poem": [
+      "風恬浪靜可行船",
+      "恰是中秋月一輪",
+      "凡事不須多憂慮",
+      "福祿自有慶家門"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=4"
+  },
+  {
+    "id": 5,
+    "title": "第五籤 甲申",
+    "poem": [
+      "只恐前途明有變",
+      "勸君作急可宜先",
+      "且守長江無大事",
+      "命逢太白守身邊"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=5"
+  },
+  {
+    "id": 6,
+    "title": "第六籤 甲戌",
+    "poem": [
+      "風雲致雨落洋洋",
+      "天災時氣必有傷",
+      "命內此事難和合",
+      "更逢一足出外鄉"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=6"
+  },
+  {
+    "id": 7,
+    "title": "第七籤 乙丑",
+    "poem": [
+      "雲開月出見分明",
+      "不須進退問前途",
+      "婚姻皆由天註定",
+      "和合清吉萬事成"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=7"
+  },
+  {
+    "id": 8,
+    "title": "第八籤 乙卯",
+    "poem": [
+      "禾稻看看結成完",
+      "此事必定兩相全",
+      "回到家中寬心坐",
+      "妻兒鼓舞樂團圓"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=8"
+  },
+  {
+    "id": 9,
+    "title": "第九籤 乙巳",
+    "poem": [
+      " 龍虎相隨在深山",
+      "君爾何須背後看",
+      "不知此去相愛誤",
+      "他日與我卻無干"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=9"
+  },
+  {
+    "id": 10,
+    "title": "第十籤 乙未",
+    "poem": [
+      "花開結子一半枯",
+      "可惜今年爾虛度",
+      "漸漸日落西山去",
+      "勸君不用向前途"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=10"
+  },
+  {
+    "id": 11,
+    "title": "第十一籤 乙酉",
+    "poem": [
+      "靈雞漸漸見分明",
+      "凡事且看子丑寅",
+      "雲開月出照天下",
+      "郎君即便見太平"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=11"
+  },
+  {
+    "id": 12,
+    "title": "第十二籤 乙亥",
+    "poem": [
+      "長江風浪漸漸靜",
+      "于今得進可安寧",
+      "必有貴人相扶助",
+      "凶事脫出見太平"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=12"
+  },
+  {
+    "id": 13,
+    "title": "第十三籤 丙子",
+    "poem": [
+      "命內正逢羅孛關",
+      "用盡心機總未休",
+      "作福問神難得過",
+      "恰是行船上高灘"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=13"
+  },
+  {
+    "id": 14,
+    "title": "第十四籤 丙寅",
+    "poem": [
+      "財中漸漸見分明",
+      "花開花謝結子成",
+      "寬心且看月中桂",
+      "郎君即便見太平"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=14"
+  },
+  {
+    "id": 15,
+    "title": "第十五籤 丙辰",
+    "poem": [
+      "八十原來是太公",
+      "看看晚景遇文王",
+      "目下緊事休相問",
+      "勸君且守待運通"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=15"
+  },
+  {
+    "id": 16,
+    "title": "第十六籤 丙午",
+    "poem": [
+      "不須作福不須求",
+      "用盡心機總未休",
+      "陽世不知陰世事",
+      "官法如爐不自由"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=16"
+  },
+  {
+    "id": 17,
+    "title": "第十七籤 丙申",
+    "poem": [
+      "舊恨重重未改為",
+      "家中禍患不臨身",
+      "須當謹防宜作福",
+      "龍蛇交會得和合"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=17"
+  },
+  {
+    "id": 18,
+    "title": "第十八籤 丙戌",
+    "poem": [
+      "君問中間此言因",
+      "看看祿馬拱前程",
+      "若得貴人多得利",
+      "和合自有兩分明"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=18"
+  },
+  {
+    "id": 19,
+    "title": "第十九籤 丁丑",
+    "poem": [
+      "富貴由命天註定",
+      "心高必然誤君期",
+      "不然且回依舊路",
+      "雲開月出自分明"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=19"
+  },
+  {
+    "id": 20,
+    "title": "第二十籤 丁卯",
+    "poem": [
+      "前途功名未得意",
+      "只恐命內有交加",
+      "兩家必定防損失",
+      "勸君且退莫咨嗟"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=20"
+  },
+  {
+    "id": 21,
+    "title": "第二十一籤 丁巳",
+    "poem": [
+      "十方佛法有靈通",
+      "大難禍患不相同",
+      "紅日當空常照耀",
+      "還有貴人到家堂"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=21"
+  },
+  {
+    "id": 22,
+    "title": "第二十二籤 丁未",
+    "poem": [
+      "太公八十家業成",
+      "月出光輝四海明",
+      "命內自然逢大吉",
+      "茅屋中間百事亨"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=22"
+  },
+  {
+    "id": 23,
+    "title": "第二十三籤 丁酉",
+    "poem": [
+      "欲去長江水闊茫",
+      "前途未遂運未通",
+      "如今絲綸常在手",
+      "只恐魚水不相逢"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=23"
+  },
+  {
+    "id": 24,
+    "title": "第二十四籤 丁亥",
+    "poem": [
+      "月出光輝四海明",
+      "前途祿位見太平",
+      "浮雲掃退終無事",
+      "可保禍患不臨身"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=24"
+  },
+  {
+    "id": 25,
+    "title": "第二十五籤 戊子",
+    "poem": [
+      "總是前途莫心勞",
+      "求神問聖枉是多",
+      "但看雞犬日過後",
+      "不須作福事如何"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=25"
+  },
+  {
+    "id": 26,
+    "title": "第二十六籤 戊寅",
+    "poem": [
+      "選出牡丹第一枝",
+      "勸君折取莫遲疑",
+      "世間若問相知處",
+      "萬事逢春正及時"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=26"
+  },
+  {
+    "id": 27,
+    "title": "第二十七籤 戊辰",
+    "poem": [
+      "君爾寬心且自由",
+      "門庭清吉家無憂",
+      "財寶自然終吉利",
+      "凡事無傷不用求"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=27"
+  },
+  {
+    "id": 28,
+    "title": "第二十八籤 戊午",
+    "poem": [
+      "於今莫作此當時",
+      "虎落平陽被犬欺",
+      "世間凡事何難定",
+      "千山萬水也遲疑"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=28"
+  },
+  {
+    "id": 29,
+    "title": "第二十九籤 戊申",
+    "poem": [
+      "枯木可惜未逢春",
+      "如今還在暗中藏",
+      "寬心且守風霜退",
+      "還君依舊作乾坤"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=29"
+  },
+  {
+    "id": 30,
+    "title": "第三十籤 戊戌",
+    "poem": [
+      "漸漸看此月中和",
+      "過後須防未得高",
+      "改變顏色前途去",
+      "凡事必定見重勞"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=30"
+  },
+  {
+    "id": 31,
+    "title": "第三十一籤 己丑",
+    "poem": [
+      "綠柳蒼蒼正當時",
+      "任君此去作乾坤",
+      "花菓結寔無殘謝",
+      "福祿自有慶家門"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=31"
+  },
+  {
+    "id": 32,
+    "title": "第三十二籤 己卯",
+    "poem": [
+      "龍虎相交在門前",
+      "此事必定兩相連",
+      "黃金忽然變成鐵",
+      "何用作福問神仙"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=32"
+  },
+  {
+    "id": 33,
+    "title": "第三十三籤 己巳",
+    "poem": [
+      "欲去長江水闊茫",
+      "行舟把定未遭風",
+      "戶內用心再作福",
+      "看看魚水得相逢"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=33"
+  },
+  {
+    "id": 34,
+    "title": "第三十四籤 己未",
+    "poem": [
+      "危險高山行過盡",
+      "莫嫌此路有重重",
+      "若見蘭桂漸漸發",
+      "去蛇反轉變成龍"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=34"
+  },
+  {
+    "id": 35,
+    "title": "第三十五籤 己酉",
+    "poem": [
+      "此事何須用心機",
+      "前途變怪自然知",
+      "看看此去得和合",
+      "漸漸脫出見太平"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=35"
+  },
+  {
+    "id": 36,
+    "title": "第三十六籤 己亥",
+    "poem": [
+      "福如東海壽如山",
+      "君爾何須嘆苦難",
+      "命內自然逢大吉",
+      "祈保分明自平安"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=36"
+  },
+  {
+    "id": 37,
+    "title": "第三十七籤 庚子",
+    "poem": [
+      "運逢得意身顯變",
+      "君爾身中皆有益",
+      "一向前途無難事",
+      "決意之中保清吉"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=37"
+  },
+  {
+    "id": 38,
+    "title": "第三十八籤 庚寅",
+    "poem": [
+      "名顯有意在中間",
+      "不須祈禱心自安",
+      "看看早晚日過後",
+      "即時得意在中間"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=38"
+  },
+  {
+    "id": 39,
+    "title": "第三十九籤 庚辰",
+    "poem": [
+      "意中若問神仙路",
+      "勸爾且退望高樓",
+      "寬心且守寬心坐",
+      "必然遇得貴人扶"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=39"
+  },
+  {
+    "id": 40,
+    "title": "第四十籤 庚午",
+    "poem": [
+      "平生富貴成祿位",
+      "君家門戶定光輝",
+      "此中必定無損失",
+      "夫妻百歲喜相隨"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=40"
+  },
+  {
+    "id": 41,
+    "title": "第四十一籤 庚申",
+    "poem": [
+      "今行到此寔難推",
+      "歌歌暢飲自徘徊",
+      "雞犬相聞消息近",
+      "婚姻夙世結成雙"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=41"
+  },
+  {
+    "id": 42,
+    "title": "第四十二籤 庚戌",
+    "poem": [
+      "一重江水一重山",
+      "誰知此去路又難",
+      "任他改求終不過",
+      "是非終久未得安"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=42"
+  },
+  {
+    "id": 43,
+    "title": "第四十三籤 辛丑",
+    "poem": [
+      "一年作事急如飛",
+      "君爾寬心莫遲疑",
+      "貴人還在千里外",
+      "音信月中漸漸知"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=43"
+  },
+  {
+    "id": 44,
+    "title": "第四十四籤 辛卯",
+    "poem": [
+      "客到前途多得利",
+      "君爾何故兩相疑",
+      "雖是中間逢進退",
+      "月出光輝得運時"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=44"
+  },
+  {
+    "id": 45,
+    "title": "第四十五籤 辛巳",
+    "poem": [
+      "花開今已結成果",
+      "富貴榮華終到老",
+      "君子小人相會合",
+      "萬事清吉莫煩惱"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=45"
+  },
+  {
+    "id": 46,
+    "title": "第四十六籤 辛未",
+    "poem": [
+      "功名得意與君顯",
+      "前途富貴喜安然",
+      "若遇一輪明月照",
+      "十五團圓照滿天"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=46"
+  },
+  {
+    "id": 47,
+    "title": "第四十七籤 辛酉",
+    "poem": [
+      "君爾何須問聖跡",
+      "自己心中皆有益",
+      "於今且看月中旬",
+      "凶事脫出化成吉"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=47"
+  },
+  {
+    "id": 48,
+    "title": "第四十八籤 辛亥",
+    "poem": [
+      "陰世作事未和同",
+      "雲遮月色正矇矇",
+      "心中意欲前途去",
+      "只恐命內運未通"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=48"
+  },
+  {
+    "id": 49,
+    "title": "第四十九籤 壬子",
+    "poem": [
+      "言語雖多不可從",
+      "風雲靜處未行龍",
+      "暗中終得明消息",
+      "君爾何須問重重"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=49"
+  },
+  {
+    "id": 50,
+    "title": "第五十籤 壬寅",
+    "poem": [
+      "佛前發誓無異心",
+      "且看前途得好音",
+      "此物原來本是鐵",
+      "亦能變化得成金"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=50"
+  },
+  {
+    "id": 51,
+    "title": "第五十一籤 壬辰",
+    "poem": [
+      "東西南北不堪行",
+      "前途此事正可當",
+      "勸君把定莫煩惱",
+      "家門自有保安康"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=51"
+  },
+  {
+    "id": 52,
+    "title": "第五十二籤 壬午",
+    "poem": [
+      "功名事業本由天",
+      "不須掛念意懸懸",
+      "若問中間遲與速",
+      "風雲際會在眼前"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=52"
+  },
+  {
+    "id": 53,
+    "title": "第五十三籤 壬申",
+    "poem": [
+      "看君來問心中事",
+      "積善之家慶有餘",
+      "運亨財子雙雙至",
+      "指日喜氣溢門閭"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=53"
+  },
+  {
+    "id": 54,
+    "title": "第五十四籤 壬戌",
+    "poem": [
+      "孤燈寂寂夜沉沉",
+      "萬事清吉萬事成",
+      "若逢陰中有善果",
+      "燒得好香達神明"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=54"
+  },
+  {
+    "id": 55,
+    "title": "第五十五籤 癸丑",
+    "poem": [
+      "須知進退總虛言",
+      "看看發暗未必全",
+      "珠玉深藏還未變",
+      "心中但得枉徒然"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=55"
+  },
+  {
+    "id": 56,
+    "title": "第五十六籤 癸卯",
+    "poem": [
+      "病中若得苦心勞",
+      "到底完全總未遭",
+      "去後不須回頭問",
+      "心中事務盡消磨"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=56"
+  },
+  {
+    "id": 57,
+    "title": "第五十七籤 癸巳",
+    "poem": [
+      "勸君把定心莫虛",
+      "前途清吉喜安然",
+      "到底中間無大事",
+      "又遇神仙守安居"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=57"
+  },
+  {
+    "id": 58,
+    "title": "第五十八籤 癸未",
+    "poem": [
+      "蛇身意欲變成龍",
+      "只恐命內運未通",
+      "久病且作寬心坐",
+      "言語雖多不可從"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=58"
+  },
+  {
+    "id": 59,
+    "title": "第五十九籤 癸酉",
+    "poem": [
+      "有心作福莫遲疑",
+      "求名清吉正當時",
+      "此事必定成會合",
+      "財寶自然喜相隨"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=59"
+  },
+  {
+    "id": 60,
+    "title": "第六十籤 癸亥",
+    "poem": [
+      "月出光輝本清吉",
+      "浮雲總是蔽陰色",
+      "戶內用心再作福",
+      "當官分理便有益"
+    ],
+    "source": "http://www.ma-tsu.com.tw/lot_go.asp?anum=60"
+  }
+]
