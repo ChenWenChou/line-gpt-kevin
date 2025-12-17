@@ -2,7 +2,13 @@ import express from "express";
 import line from "@line/bot-sdk";
 import OpenAI from "openai";
 // 求籤
-import mazuLots from "./mazu_lots.json" assert { type: "json" };
+import fs from "fs";
+import path from "path";
+
+const __dirname = new URL(".", import.meta.url).pathname;
+const mazuLots = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "mazu_lots.json"), "utf8")
+);
 
 const BOT_USER_ID = "U51d2392e43f851607a191adb3ec49b26";
 const app = express();
@@ -731,25 +737,27 @@ function buildMazuLotFlex({ title, poem, advice }) {
 }
 
 async function explainLotPlain(poem) {
-  const text = poem.join(" ");
+  try {
+    const text = poem.join(" ");
 
-  const res = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content:
-          "你是一位理性溫和的文字解說者，請用口語白話解釋籤詩的『提醒方向』，避免預言、避免保證性語句，控制在 2~3 句。",
-      },
-      {
-        role: "user",
-        content: text,
-      },
-    ],
-    max_tokens: 120,
-  });
+    const res = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "你是一位理性溫和的文字解說者，請用口語白話解釋籤詩的『提醒方向』，避免預言、避免保證性語句，控制在 2~3 句。",
+        },
+        { role: "user", content: text },
+      ],
+      max_tokens: 120,
+    });
 
-  return res.choices[0].message.content.trim();
+    return res.choices[0].message.content.trim();
+  } catch (err) {
+    console.error("❌ 解籤失敗", err);
+    return "這支籤提醒你放慢腳步，先觀察局勢，再做決定。";
+  }
 }
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
