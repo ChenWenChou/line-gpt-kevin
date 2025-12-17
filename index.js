@@ -5,6 +5,8 @@ import OpenAI from "openai";
 const BOT_USER_ID = "U51d2392e43f851607a191adb3ec49b26";
 const app = express();
 
+app.use(express.static("public"))
+
 // LINE 設定
 const config = {
   channelAccessToken: process.env.LINE_TOKEN,
@@ -192,6 +194,7 @@ function buildOutfitAdvice(temp, feelsLike, rainProbability) {
     .filter(Boolean)
     .join("\n");
 }
+
 
 // 台灣離島人工座標
 const TAIWAN_ISLANDS = {
