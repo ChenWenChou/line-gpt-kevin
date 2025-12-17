@@ -780,10 +780,9 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           event.message.type === "text" ? event.message.text.trim() : "";
 
         const calledByName =
-          userMessage.startsWith("@KevinBot") ||
-          userMessage.startsWith("KevinBot") ||
-          userMessage.startsWith("kevinbot") ||
-          userMessage.startsWith("助理");
+          userMessage.includes("助理") ||
+          userMessage.includes("KevinBot") ||
+          userMessage.includes("kevinbot");
 
         if (!mentionedBot && !calledByName) continue;
       }
