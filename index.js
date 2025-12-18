@@ -789,6 +789,19 @@ function getTodayKey(offset = 0) {
 function renderStars(n = 0) {
   return "★".repeat(n) + "☆".repeat(5 - n);
 }
+function calcStar(date, signEn) {
+  // 簡單 deterministic hash
+  const base = [...(date + signEn)].reduce((a, c) => a + c.charCodeAt(0), 0);
+  return (base % 5) + 1; // 1~5
+}
+function calcLuckyNumber(date, signEn) {
+  const base = [...(signEn + date)].reduce(
+    (a, c) => a * 31 + c.charCodeAt(0),
+    7
+  );
+  return (base % 99) + 1;
+}
+
 function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
   const imageUrl = `https://raw.githubusercontent.com/ChenWenChou/line-gpt-kevin/main/public/image/${signEn}.png`;
 
@@ -849,9 +862,9 @@ function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
           { type: "separator", margin: "md" },
           {
             type: "text",
-            text: "※ 本預測為聊天助理模型預測，我無法知道星相，跟國師會有落差！",
+            text: "※ 我無法知道星相，跟國師會有落差！",
             size: "xs",
-            color: "#AAAAAA",
+            color: "#ff0741",
           },
         ],
       },
@@ -865,7 +878,7 @@ async function getDailyHoroscope(signZh, when = "today") {
 
   const date = when === "tomorrow" ? getTodayKey(1) : getTodayKey(0);
 
-  const kvKey = `horoscope:v3:${date}:${sign}`;
+  const kvKey = `horoscope:v4:${date}:${sign}`;
 
   // ① 先查 KV
   const cached = await redis.get(kvKey);
@@ -890,11 +903,9 @@ async function getDailyHoroscope(signZh, when = "today") {
 
 格式：
 {
-  "overall": 1~5 的整數,
   "work": "...",
   "love": "...",
-  "money": "...",
-  "luckyNumber": 1~99
+  "money": "..."
 }
 
 限制：
@@ -915,10 +926,14 @@ async function getDailyHoroscope(signZh, when = "today") {
   } catch {
     throw new Error("Horoscope JSON parse failed");
   }
+  const overall = calcStar(date, sign);
+  const luckyNumber = calcLuckyNumber(date, sign);
 
   const payload = {
     sign: signZh,
     when,
+    overall,
+    luckyNumber,
     ...data,
   };
 
