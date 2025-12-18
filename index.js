@@ -5,6 +5,9 @@ import OpenAI from "openai";
 import fs from "fs";
 import path from "path";
 
+// 星座 會用到 ＫＶ 資料庫
+import { kv } from "@vercel/kv";
+
 const __dirname = new URL(".", import.meta.url).pathname;
 const mazuLots = JSON.parse(
   fs.readFileSync(path.join(__dirname, "mazu_lots.json"), "utf8")
@@ -760,6 +763,126 @@ async function explainLotPlain(poem) {
   }
 }
 
+// 星座
+const ZODIAC_MAP = {
+  牡羊: "aries",
+  金牛: "taurus",
+  雙子: "gemini",
+  巨蟹: "cancer",
+  獅子: "leo",
+  處女: "virgo",
+  天秤: "libra",
+  天蠍: "scorpio",
+  射手: "sagittarius",
+  摩羯: "capricorn",
+  水瓶: "aquarius",
+  雙魚: "pisces",
+};
+
+function getTodayKey(offset = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return d.toISOString().slice(0, 10);
+}
+function buildHoroscopeFlex({ signZh, whenLabel, text }) {
+  return {
+    type: "flex",
+    altText: `${whenLabel}${signZh}座運勢`,
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        contents: [
+          {
+            type: "text",
+            text: "🔮 每日星座運勢",
+            size: "sm",
+            color: "#888888",
+          },
+          {
+            type: "text",
+            text: `${whenLabel}${signZh}座`,
+            size: "xl",
+            weight: "bold",
+          },
+          {
+            type: "separator",
+          },
+          {
+            type: "text",
+            text: text,
+            wrap: true,
+            size: "md",
+          },
+          {
+            type: "separator",
+            margin: "md",
+          },
+          {
+            type: "text",
+            text: "※ 同一天同星座結果固定",
+            size: "xs",
+            color: "#AAAAAA",
+          },
+        ],
+      },
+    },
+  };
+}
+
+async function getDailyHoroscope(signZh, when = "today") {
+  const sign = ZODIAC_MAP[signZh];
+  if (!sign) return null;
+
+  const date = when === "tomorrow" ? getTodayKey(1) : getTodayKey(0);
+
+  const kvKey = `horoscope:${date}:${sign}`;
+
+  // ① 先查 KV
+  const cached = await kv.get(kvKey);
+  if (cached) {
+    console.log("🟢 Horoscope cache hit:", kvKey);
+    return cached;
+  }
+
+  console.log("🟡 Horoscope cache miss:", kvKey);
+
+  // ② 沒有才問 GPT（只會發生一次）
+  const whenLabel = when === "tomorrow" ? "明日" : "今日";
+
+  const res = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "你是理性、不渲染恐懼的星座運勢撰寫者，避免極端好壞、避免保證性語句。",
+      },
+      {
+        role: "user",
+        content: `請給我「${whenLabel}${signZh}座」整體運勢，包含：一句總評 + 一句提醒，控制在 3 行內。`,
+      },
+    ],
+    max_tokens: 120,
+  });
+
+  const text = res.choices[0].message.content.trim();
+
+  const payload = {
+    sign: signZh,
+    when,
+    text,
+  };
+
+  // ③ 存 KV（一天）
+  await kv.set(kvKey, payload, { ex: 60 * 60 * 24 });
+
+  return payload;
+}
+
 app.post("/webhook", line.middleware(config), async (req, res) => {
   const events = req.body.events || [];
 
@@ -828,6 +951,43 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         });
 
         await client.replyMessage(event.replyToken, flex);
+        continue;
+      }
+      // ─────────────────────────────────────
+      // 星座運勢
+      // ─────────────────────────────────────
+      const zodiacMatch = userMessage.match(
+        /(牡羊|金牛|雙子|巨蟹|獅子|處女|天秤|天蠍|射手|摩羯|水瓶|雙魚)座/
+      );
+
+      const when =
+        userMessage.includes("明天") || userMessage.includes("明日")
+          ? "tomorrow"
+          : "today";
+
+      if (zodiacMatch) {
+        const signZh = zodiacMatch[1];
+
+        const result = await getDailyHoroscope(signZh, when);
+
+        if (!result) {
+          await client.replyMessage(event.replyToken, {
+            type: "text",
+            text: "這個星座我暫時還看不懂，再試一次？",
+          });
+          continue;
+        }
+
+        const whenLabel = when === "tomorrow" ? "明日" : "今日";
+
+        const flex = buildHoroscopeFlex({
+          signZh,
+          whenLabel,
+          text: result.text,
+        });
+
+        await client.replyMessage(event.replyToken, flex);
+
         continue;
       }
 
