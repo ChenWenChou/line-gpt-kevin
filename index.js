@@ -802,7 +802,7 @@ function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
         type: "image",
         url: imageUrl,
         size: "full",
-        aspectRatio: "1:1",
+        aspectRatio: "20:13",
         aspectMode: "cover",
       },
       body: {
@@ -818,7 +818,7 @@ function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
           },
           {
             type: "text",
-            text: renderStars(data.overall),
+            text: renderStars(data.overall ?? 0),
             size: "lg",
             color: "#F5A623",
           },
@@ -826,22 +826,22 @@ function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
 
           {
             type: "text",
-            text: `💼 工作：${data.work}`,
+            text: `💼 工作：${data.work ?? "今日適合穩定推進"}`,
             wrap: true,
           },
           {
             type: "text",
-            text: `❤️ 感情：${data.love}`,
+            text: `❤️ 感情：${data.love ?? "多一點體貼就很加分"}`,
             wrap: true,
           },
           {
             type: "text",
-            text: `💰 財運：${data.money}`,
+            text: `💰 財運：${data.money ?? "保守理財較安心"}`,
             wrap: true,
           },
           {
             type: "text",
-            text: `🎯 幸運數字：${data.luckyNumber}`,
+            text: `🎯 幸運數字：${data.luckyNumber ?? "-"}`,
             wrap: true,
             weight: "bold",
           },
@@ -865,7 +865,7 @@ async function getDailyHoroscope(signZh, when = "today") {
 
   const date = when === "tomorrow" ? getTodayKey(1) : getTodayKey(0);
 
-  const kvKey = `horoscope:${date}:${sign}`;
+  const kvKey = `horoscope:v2:${date}:${sign}`;
 
   // ① 先查 KV
   const cached = await redis.get(kvKey);
