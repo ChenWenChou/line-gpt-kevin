@@ -786,13 +786,25 @@ function getTodayKey(offset = 0) {
   d.setDate(d.getDate() + offset);
   return d.toISOString().slice(0, 10);
 }
-function buildHoroscopeFlex({ signZh, whenLabel, text }) {
+function renderStars(n = 0) {
+  return "★".repeat(n) + "☆".repeat(5 - n);
+}
+function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
+  const imageUrl = `https://raw.githubusercontent.com/ChenWenChou/line-gpt-kevin/main/public/image/${signEn}.png`;
+
   return {
     type: "flex",
     altText: `${whenLabel}${signZh}座運勢`,
     contents: {
       type: "bubble",
       size: "mega",
+      hero: {
+        type: "image",
+        url: imageUrl,
+        size: "full",
+        aspectRatio: "1:1",
+        aspectMode: "cover",
+      },
       body: {
         type: "box",
         layout: "vertical",
@@ -800,32 +812,44 @@ function buildHoroscopeFlex({ signZh, whenLabel, text }) {
         contents: [
           {
             type: "text",
-            text: "🔮 每日星座運勢",
-            size: "sm",
-            color: "#888888",
-          },
-          {
-            type: "text",
-            text: `${whenLabel}${signZh}座`,
+            text: `🔮 ${whenLabel}${signZh}座運勢`,
             size: "xl",
             weight: "bold",
           },
           {
-            type: "separator",
+            type: "text",
+            text: renderStars(data.overall),
+            size: "lg",
+            color: "#F5A623",
           },
+          { type: "separator" },
+
           {
             type: "text",
-            text: text,
+            text: `💼 工作：${data.work}`,
             wrap: true,
-            size: "md",
-          },
-          {
-            type: "separator",
-            margin: "md",
           },
           {
             type: "text",
-            text: "※ 同一天同星座結果固定",
+            text: `❤️ 感情：${data.love}`,
+            wrap: true,
+          },
+          {
+            type: "text",
+            text: `💰 財運：${data.money}`,
+            wrap: true,
+          },
+          {
+            type: "text",
+            text: `🎯 幸運數字：${data.luckyNumber}`,
+            wrap: true,
+            weight: "bold",
+          },
+
+          { type: "separator", margin: "md" },
+          {
+            type: "text",
+            text: "※ 星座運勢僅供參考，請理性看待",
             size: "xs",
             color: "#AAAAAA",
           },
@@ -856,22 +880,39 @@ async function getDailyHoroscope(signZh, when = "today") {
       {
         role: "system",
         content:
-          "你是理性、不渲染恐懼的星座運勢撰寫者，避免極端好壞、避免保證性語句。",
+          "你是理性、不渲染恐懼的星座運勢撰寫者，避免極端好壞、避免保證性語句。請只回傳 JSON，不要多任何文字。",
       },
       {
         role: "user",
-        content: `請給我「${whenLabel}${signZh}座」整體運勢，包含：一句總評 + 一句提醒，控制在 3 行內。`,
+        content: `
+請產生「${whenLabel}${signZh}座」運勢，格式如下：
+{
+  "overall": 1~5 的整數,
+  "work": "工作運勢一句話",
+  "love": "感情運勢一句話",
+  "money": "財運一句話",
+  "luckyNumber": 1~99 的整數
+}
+限制：每一句 20 字內，口語、溫和。
+`,
       },
     ],
-    max_tokens: 120,
+    max_tokens: 200,
   });
 
   const text = res.choices[0].message.content.trim();
 
+  let data;
+  try {
+    data = JSON.parse(res.choices[0].message.content);
+  } catch {
+    throw new Error("Horoscope JSON parse failed");
+  }
+
   const payload = {
     sign: signZh,
     when,
-    text,
+    ...data,
   };
 
   // ③ 存 KV（一天）
@@ -977,10 +1018,11 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
         const whenLabel = when === "tomorrow" ? "明日" : "今日";
 
-        const flex = buildHoroscopeFlex({
+        const flex = buildHoroscopeFlexV2({
           signZh,
+          signEn: ZODIAC_MAP[signZh],
           whenLabel,
-          text: result.text,
+          data: result,
         });
 
         await client.replyMessage(event.replyToken, flex);
