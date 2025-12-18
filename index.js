@@ -798,12 +798,19 @@ function calcStar(date, signEn) {
   const base = [...(date + signEn)].reduce((a, c) => a + c.charCodeAt(0), 0);
   return (base % 5) + 1; // 1~5
 }
+
 function calcLuckyNumber(date, signEn) {
-  const base = [...(signEn + date)].reduce(
-    (a, c) => a * 31 + c.charCodeAt(0),
-    7
-  );
-  return (base % 99) + 1;
+  // 先把日期變成穩定數字（YYYY-MM-DD）
+  const dateBase = date.replace(/-/g, "");
+  let seed = parseInt(dateBase, 10);
+
+  // 星座影響（小幅偏移）
+  for (const c of signEn) {
+    seed += c.charCodeAt(0);
+  }
+
+  // 轉成 1~99
+  return (seed % 99) + 1;
 }
 
 function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
@@ -882,7 +889,7 @@ async function getDailyHoroscope(signZh, when = "today") {
 
   const date = when === "tomorrow" ? getTodayKey(1) : getTodayKey(0);
 
-  const kvKey = `horoscope:v4:${date}:${sign}`;
+  const kvKey = `horoscope:v5:${date}:${sign}`;
 
   // ① 先查 KV
   const cached = await redis.get(kvKey);
