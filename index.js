@@ -59,6 +59,10 @@ const TW_CITY_MAP = {
 // 簡單記憶：userId -> { city, lat, lon }
 const userLastWeatherContext = new Map();
 
+function stripBotName(text = "") {
+  return text.replace(/^(助理|KevinBot|kevinbot)\s*/i, "").trim();
+}
+
 function isTaiwanLocation(raw = "") {
   return /(台灣|臺灣|台湾|台北|臺北|新北|台中|臺中|台南|臺南|高雄|桃園|新竹|嘉義|宜蘭|花蓮|台東|臺東|澎湖|金門|馬祖|南竿|北竿|東引)/.test(
     raw
@@ -947,6 +951,7 @@ async function getDailyHoroscope(signZh, when = "today") {
 function parseFoodList(text) {
   // 常見分隔符號
   return text
+    .replace(/^(助理|KevinBot|kevinbot)\s*/i, "")
     .replace(/我(今天|剛剛)?吃了/g, "")
     .split(/、|,|，|跟|和|\n/)
     .map((s) => s.trim())
@@ -1046,7 +1051,9 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       }
 
       if (event.message.type !== "text") continue;
-      const userMessage = event.message.text.trim();
+      const rawMessage = event.message.text.trim();
+      const userMessage = rawMessage; // 判斷用（gate）
+      const parsedMessage = stripBotName(rawMessage); // 邏輯用 / GPT 用
       const userId = event.source.userId;
 
       // ─────────────────────────────────────
@@ -1110,7 +1117,11 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       // ─────────────────────────────────────
       // 星座運勢
       // ─────────────────────────────────────
-      const zodiacMatch = userMessage.match(
+      const cleanedMessage = userMessage.replace(
+        /^(助理|KevinBot|kevinbot)\s*/i,
+        ""
+      );
+      const zodiacMatch = cleanedMessage.match(
         /(牡羊|金牛|雙子|巨蟹|獅子|處女|天秤|天蠍|射手|摩羯|水瓶|雙魚)座/
       );
 
@@ -1208,7 +1219,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             content:
               "你是一個意圖判斷與解析器。【地點判斷規則】1. 使用者提到的台灣城市（台北、台中、桃園、新竹、嘉義、台南、高雄、花蓮、宜蘭、馬祖、金門、澎湖、南竿、北竿、東引等）一律視為台灣的城市或離島。2. 如果只講「台中」「台南」「台北」這類簡稱，也必須自動解析為「台灣台中市」「台灣台南市」「台灣台北市」。3. 除非使用者明確說「中國的 XXX」，否則地點預設為台灣。4. 如果使用者提到「國家 + 城市」如「日本大阪」「韓國首爾」「美國紐約」，直接視為該國城市。5. 如果只講國際城市（如大阪、東京、紐約、巴黎等），推論最常見的國家（大阪→日本）。【意圖規則】如果訊息是在問天氣、氣溫、下雨、冷不冷、穿什麼，請回：WEATHER|城市名稱（英文名）|whenwhen 僅能是 today / tomorrow / day_after（使用者問「明天」就回 tomorrow，「後天」就回 day_after）其他請回：NO",
           },
-          { role: "user", content: userMessage },
+          { role: "user", content: parsedMessage },
         ],
       });
 
@@ -1249,7 +1260,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             content:
               "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot，由 OpenAI API 驅動。",
           },
-          { role: "user", content: userMessage },
+          { role: "user", content: parsedMessage }, 
         ],
       });
 
