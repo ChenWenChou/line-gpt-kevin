@@ -5,8 +5,10 @@ import OpenAI from "openai";
 import fs from "fs";
 import path from "path";
 
-// 星座 會用到 ＫＶ 資料庫
-import { kv } from "@vercel/kv";
+// 星座 會用到 Redis  資料庫
+import Redis from "ioredis";
+
+const redis = new Redis(process.env.REDIS_URL);
 
 const __dirname = new URL(".", import.meta.url).pathname;
 const mazuLots = JSON.parse(
@@ -842,13 +844,8 @@ async function getDailyHoroscope(signZh, when = "today") {
   const kvKey = `horoscope:${date}:${sign}`;
 
   // ① 先查 KV
-  const cached = await kv.get(kvKey);
-  if (cached) {
-    console.log("🟢 Horoscope cache hit:", kvKey);
-    return cached;
-  }
-
-  console.log("🟡 Horoscope cache miss:", kvKey);
+  const cached = await redis.get(kvKey);
+  if (cached) return JSON.parse(cached);
 
   // ② 沒有才問 GPT（只會發生一次）
   const whenLabel = when === "tomorrow" ? "明日" : "今日";
@@ -878,7 +875,7 @@ async function getDailyHoroscope(signZh, when = "today") {
   };
 
   // ③ 存 KV（一天）
-  await kv.set(kvKey, payload, { ex: 60 * 60 * 24 });
+  await redis.set(kvKey, JSON.stringify(payload), "EX", 60 * 60 * 24);
 
   return payload;
 }
