@@ -849,7 +849,7 @@ function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
           { type: "separator", margin: "md" },
           {
             type: "text",
-            text: "※ 星座運勢僅供參考，請理性看待",
+            text: "※ 本預測為聊天助理模型預測，我無法知道星相，跟國師會有落差！",
             size: "xs",
             color: "#AAAAAA",
           },
@@ -865,7 +865,7 @@ async function getDailyHoroscope(signZh, when = "today") {
 
   const date = when === "tomorrow" ? getTodayKey(1) : getTodayKey(0);
 
-  const kvKey = `horoscope:v2:${date}:${sign}`;
+  const kvKey = `horoscope:v3:${date}:${sign}`;
 
   // ① 先查 KV
   const cached = await redis.get(kvKey);
@@ -880,20 +880,27 @@ async function getDailyHoroscope(signZh, when = "today") {
       {
         role: "system",
         content:
-          "你是理性、不渲染恐懼的星座運勢撰寫者，避免極端好壞、避免保證性語句。請只回傳 JSON，不要多任何文字。",
+          "你是理性、不渲染極端的星座運勢撰寫者，避免極端好壞、避免保證性語句、同時帶點生活詼諧幽默感。請只回傳 JSON，不要多任何文字。",
       },
       {
         role: "user",
         content: `
-請產生「${whenLabel}${signZh}座」運勢，格式如下：
+請產生「${whenLabel}${signZh}座」運勢。
+請明顯反映「${signZh}座的典型性格」。
+
+格式：
 {
   "overall": 1~5 的整數,
-  "work": "工作運勢一句話",
-  "love": "感情運勢一句話",
-  "money": "財運一句話",
-  "luckyNumber": 1~99 的整數
+  "work": "...",
+  "love": "...",
+  "money": "...",
+  "luckyNumber": 1~99
 }
-限制：每一句 20 字內，口語、溫和。
+
+限制：
+- 每句 20 字內
+- 不要過度中性
+- 同一天不同星座請有明顯差異
 `,
       },
     ],
