@@ -943,6 +943,58 @@ async function getDailyHoroscope(signZh, when = "today") {
   return payload;
 }
 
+// 計算熱量
+function parseFoodList(text) {
+  // 常見分隔符號
+  return text
+    .replace(/我(今天|剛剛)?吃了/g, "")
+    .split(/、|,|，|跟|和|\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+async function estimateFoodCalorie(food) {
+  const today = getTodayKey(0);
+  const key = `food:estimate:${today}:${food}`;
+
+  const cached = await redis.get(key);
+  if (cached) return JSON.parse(cached);
+
+  const res = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "你是生活型熱量估算助理，只能提供『熱量區間』，不可給精準數字。請只回 JSON。",
+      },
+      {
+        role: "user",
+        content: `
+請估算以下食物的熱量區間（台灣常見份量）：
+
+食物：${food}
+
+格式：
+{
+  "food": "${food}",
+  "min": 0,
+  "max": 0,
+  "note": "一句影響因素"
+}
+`,
+      },
+    ],
+    max_tokens: 150,
+  });
+
+  const data = JSON.parse(res.choices[0].message.content);
+
+  await redis.set(key, JSON.stringify(data), "EX", 60 * 60 * 24);
+
+  return data;
+}
+
 app.post("/webhook", line.middleware(config), async (req, res) => {
   const events = req.body.events || [];
 
@@ -1013,6 +1065,48 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         await client.replyMessage(event.replyToken, flex);
         continue;
       }
+      // ─────────────────────────────────────
+      // 🍽 食物熱量估算（支援多道菜）
+      // ─────────────────────────────────────
+      if (/吃了|熱量|卡路里/.test(userMessage)) {
+        const foods = parseFoodList(userMessage);
+
+        if (foods.length === 0) {
+          await client.replyMessage(event.replyToken, {
+            type: "text",
+            text: "你吃了什麼？可以一次列多道菜喔 😄",
+          });
+          continue;
+        }
+
+        const results = [];
+        let totalMin = 0;
+        let totalMax = 0;
+
+        for (const food of foods) {
+          const r = await estimateFoodCalorie(food);
+          results.push(r);
+          totalMin += r.min;
+          totalMax += r.max;
+        }
+
+        // 文字版（先穩）
+        const lines = results.map(
+          (r) => `• ${r.food}：${r.min}～${r.max} 大卡`
+        );
+
+        lines.push("");
+        lines.push(`👉 總熱量：約 ${totalMin}～${totalMax} 大卡`);
+        lines.push("※ 快速估算，非精準營養計算");
+
+        await client.replyMessage(event.replyToken, {
+          type: "text",
+          text: lines.join("\n"),
+        });
+
+        continue;
+      }
+
       // ─────────────────────────────────────
       // 星座運勢
       // ─────────────────────────────────────
