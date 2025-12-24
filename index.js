@@ -1065,13 +1065,9 @@ async function getStockQuote(symbol) {
 
   // ✅ 昨收
   const prevClose =
-    meta.previousClose ??
-    closes.filter((v) => typeof v === "number")[0];
+    meta.previousClose ?? closes.filter((v) => typeof v === "number")[0];
 
-  if (
-    typeof price !== "number" ||
-    typeof prevClose !== "number"
-  ) {
+  if (typeof price !== "number" || typeof prevClose !== "number") {
     return null;
   }
 
@@ -1086,6 +1082,227 @@ async function getStockQuote(symbol) {
     volume: meta.regularMarketVolume,
   };
 }
+
+// 聖經小卡（50 節，適合每日抽）
+const BIBLE_VERSES = [
+  { ref: "約翰福音 3:16" },
+  { ref: "詩篇 23:1" },
+  { ref: "以賽亞書 41:10" },
+  { ref: "馬太福音 11:28" },
+  { ref: "羅馬書 8:28" },
+
+  { ref: "詩篇 46:1" },
+  { ref: "箴言 3:5" },
+  { ref: "箴言 3:6" },
+  { ref: "詩篇 34:4" },
+  { ref: "詩篇 37:5" },
+
+  { ref: "詩篇 119:105" },
+  { ref: "以賽亞書 40:31" },
+  { ref: "耶利米書 29:11" },
+  { ref: "約書亞記 1:9" },
+  { ref: "詩篇 55:22" },
+
+  { ref: "詩篇 91:1" },
+  { ref: "詩篇 121:1" },
+  { ref: "詩篇 121:2" },
+  { ref: "箴言 16:3" },
+  { ref: "傳道書 3:1" },
+
+  { ref: "馬太福音 6:34" },
+  { ref: "馬太福音 7:7" },
+  { ref: "馬太福音 5:16" },
+  { ref: "馬太福音 28:20" },
+  { ref: "約翰福音 14:27" },
+
+  { ref: "約翰福音 16:33" },
+  { ref: "羅馬書 12:2" },
+  { ref: "羅馬書 15:13" },
+  { ref: "哥林多前書 13:13" },
+  { ref: "哥林多後書 5:7" },
+
+  { ref: "加拉太書 6:9" },
+  { ref: "以弗所書 3:20" },
+  { ref: "以弗所書 6:10" },
+  { ref: "腓立比書 4:6" },
+  { ref: "腓立比書 4:7" },
+
+  { ref: "腓立比書 4:13" },
+  { ref: "歌羅西書 3:23" },
+  { ref: "提摩太後書 1:7" },
+  { ref: "希伯來書 11:1" },
+  { ref: "希伯來書 13:5" },
+
+  { ref: "雅各書 1:5" },
+  { ref: "彼得前書 5:7" },
+  { ref: "約翰一書 4:18" },
+];
+
+function buildBibleCardFlex({ verse, encouragement, reference }) {
+  return {
+    type: "flex",
+    altText: `📖 今日經文｜${reference}`,
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        contents: [
+          {
+            type: "text",
+            text: "📖 今日一節",
+            size: "sm",
+            color: "#888888",
+            weight: "bold",
+          },
+          {
+            type: "text",
+            text: verse,
+            wrap: true,
+            size: "lg",
+            weight: "bold",
+            lineSpacing: "md",
+          },
+          {
+            type: "separator",
+            margin: "lg",
+          },
+          {
+            type: "text",
+            text: encouragement,
+            wrap: true,
+            size: "md",
+            color: "#555555",
+            lineSpacing: "md",
+          },
+          {
+            type: "text",
+            text: `— ${reference}`,
+            size: "sm",
+            color: "#999999",
+            align: "end",
+            margin: "md",
+          },
+        ],
+      },
+    },
+  };
+}
+
+async function fetchBibleVerse(ref) {
+  const url = `https://bible-api.com/${encodeURIComponent(
+    ref
+  )}?translation=cuv`;
+
+  const r = await fetch(url);
+  const j = await r.json();
+
+  return {
+    verse: j.text.trim(),
+    reference: j.reference,
+  };
+}
+async function getTodayBibleCard() {
+  const key = `bible:card:${new Date().toISOString().slice(0, 10)}`;
+  const raw = await redis.get(key);
+  return raw ? JSON.parse(raw) : null;
+}
+async function generateEncouragement(verseText) {
+  const res = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content: "你是一位溫柔、不說教、不預言的文字陪伴者，只寫安靜的提醒。",
+      },
+      {
+        role: "user",
+        content: `請根據以下經文，寫 2~3 句溫柔的勉勵文字：\n${verseText}`,
+      },
+    ],
+    max_tokens: 120,
+  });
+
+  return res.choices[0].message.content.trim();
+}
+async function generateBibleCardForDate(dateKey) {
+  const index =
+    Math.abs([...dateKey].reduce((a, c) => a + c.charCodeAt(0), 0)) %
+    BIBLE_VERSES.length;
+
+  const verseMeta = BIBLE_VERSES[index];
+  const verseData = await fetchBibleVerse(verseMeta.ref);
+  const encouragement = await generateEncouragement(verseData.verse);
+
+  const payload = {
+    date: dateKey,
+    verse: verseData.verse,
+    encouragement,
+    reference: verseData.reference,
+  };
+
+  await redis.set(
+    `bible:card:${dateKey}`,
+    JSON.stringify(payload),
+    "EX",
+    60 * 60 * 24 * 40
+  );
+
+  return payload;
+}
+
+app.post("/api/generate-bible-cards", async (req, res) => {
+  if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  const today = new Date();
+  let created = 0;
+  let skipped = 0;
+
+  for (let i = 0; i < 30; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + i);
+    const dateKey = d.toISOString().slice(0, 10);
+    const redisKey = `bible:card:${dateKey}`;
+
+    // ✅ 已存在就跳過
+    const exists = await redis.get(redisKey);
+    if (exists) {
+      skipped++;
+      continue;
+    }
+
+    const verseMeta = BIBLE_VERSES[i % BIBLE_VERSES.length];
+
+    const verseData = await fetchBibleVerse(verseMeta.ref);
+    const encouragement = await generateEncouragement(verseData.verse);
+
+    const payload = {
+      date: dateKey,
+      verse: verseData.verse,
+      encouragement,
+      reference: verseData.reference,
+    };
+
+    await redis.set(
+      redisKey,
+      JSON.stringify(payload),
+      "EX",
+      60 * 60 * 24 * 40 // 40 天保險
+    );
+
+    created++;
+  }
+
+  res.json({
+    ok: true,
+    created,
+    skipped,
+  });
+});
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
   const events = req.body.events || [];
@@ -1250,6 +1467,24 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         }
 
         return; // 🔴 非常重要
+      }
+
+      // ─────────────────────────────────────
+      // 聖經小卡
+      // ─────────────────────────────────────
+      if (/抽經文|今日經文|聖經小卡/.test(userMessage)) {
+        const todayKey = new Date().toISOString().slice(0, 10);
+
+        let card = await getTodayBibleCard();
+
+        // 🧯 自救：沒有就立刻補
+        if (!card) {
+          card = await generateBibleCardForDate(todayKey);
+        }
+
+        const flex = buildBibleCardFlex(card);
+        await client.replyMessage(event.replyToken, flex);
+        continue;
       }
 
       // ─────────────────────────────────────
