@@ -1026,15 +1026,17 @@ async function findStock(query) {
   }
 
   // ✅ 2️⃣ 名稱模糊（台積電 / 鴻海）
-  return Object.values(stocks).find(
-    (s) => q.includes(s.name)
-  ) || null;
+  return Object.values(stocks).find((s) => q.includes(s.name)) || null;
 }
 
 async function getStockQuote(symbol) {
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`;
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&region=TW&lang=zh-TW`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error("Yahoo Finance error");
+  if (!res.ok) {
+    const t = await res.text();
+    console.error("Yahoo status", res.status, t.slice(0, 100));
+    return null; // ❗不要 throw
+  }
 
   const json = await res.json();
   const q = json.quoteResponse.result?.[0];
@@ -1211,7 +1213,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           });
         }
 
-        continue;
+        return; // 🔴 非常重要
       }
 
       // ─────────────────────────────────────
