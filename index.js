@@ -1007,6 +1007,41 @@ async function estimateFoodCalorie(food) {
   return data;
 }
 
+// 股市 15分鐘延遲
+
+async function findStock(query) {
+  const raw = await redis.get("twse:stocks:all");
+  if (!raw) return null;
+
+  const stocks = JSON.parse(raw);
+
+  // 代號
+  if (/^\d{4}$/.test(query)) {
+    return stocks[query];
+  }
+
+  // 名稱模糊
+  return Object.values(stocks).find((s) => query.includes(s.name));
+}
+
+async function getStockQuote(symbol) {
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Yahoo Finance error");
+
+  const json = await res.json();
+  const q = json.quoteResponse.result?.[0];
+  if (!q) return null;
+
+  return {
+    price: q.regularMarketPrice,
+    change: q.regularMarketChange,
+    changePercent: q.regularMarketChangePercent,
+    open: q.regularMarketOpen,
+    volume: q.regularMarketVolume,
+  };
+}
+
 app.post("/webhook", line.middleware(config), async (req, res) => {
   const events = req.body.events || [];
 
@@ -1121,6 +1156,57 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         continue;
       }
 
+      // ─────────────────────────────────────
+      // 📈 股票行情查詢（完整版，Redis + Yahoo）
+      // ─────────────────────────────────────
+      if (/行情|股價|多少錢/.test(userMessage)) {
+        const cleaned = stripBotName(userMessage);
+
+        // 👉 用你已經寫好的 findStock
+        const stock = await findStock(cleaned);
+
+        if (!stock) {
+          await client.replyMessage(event.replyToken, {
+            type: "text",
+            text: "我找不到這檔股票 😅\n可以試試「2330 行情」或「台積電 股價」",
+          });
+          continue;
+        }
+
+        try {
+          const q = await getStockQuote(stock.symbol);
+          if (!q) throw new Error("no data");
+
+          const sign = q.change >= 0 ? "+" : "";
+          const percent =
+            typeof q.changePercent === "number"
+              ? q.changePercent.toFixed(2)
+              : "--";
+
+          const text = `📊 ${stock.name}（${stock.code}）
+
+現價：${q.price}
+漲跌：${sign}${q.change.toFixed(2)}（${sign}${percent}%）
+開盤：${q.open}
+成交量：${q.volume?.toLocaleString()} 張
+
+※ 資料來源：Yahoo Finance（延遲報價）`;
+
+          await client.replyMessage(event.replyToken, {
+            type: "text",
+            text,
+          });
+        } catch (err) {
+          console.error("Stock error:", err);
+          await client.replyMessage(event.replyToken, {
+            type: "text",
+            text: "股價資料暫時取得失敗，請稍後再試。",
+          });
+        }
+
+        continue;
+      }
+      
       // ─────────────────────────────────────
       // 星座運勢
       // ─────────────────────────────────────
@@ -1267,7 +1353,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             content:
               "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot，由 OpenAI API 驅動。",
           },
-          { role: "user", content: parsedMessage }, 
+          { role: "user", content: parsedMessage },
         ],
       });
 
