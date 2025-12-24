@@ -1030,7 +1030,7 @@ async function findStock(query) {
 }
 
 async function getStockQuote(symbol) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=2d`;
 
   const res = await fetch(url, {
     headers: {
@@ -1047,18 +1047,42 @@ async function getStockQuote(symbol) {
 
   const json = await res.json();
   const result = json.chart?.result?.[0];
-  const meta = result?.meta;
+  if (!result) return null;
 
-  if (!meta) return null;
+  const meta = result.meta || {};
+  const quote = result.indicators?.quote?.[0] || {};
+  const closes = result.indicators?.quote?.[0]?.close || [];
+
+  // ✅ 價格：優先用 regularMarketPrice，不行就用最後一根 close
+  const price =
+    meta.regularMarketPrice ??
+    closes.filter((v) => typeof v === "number").slice(-1)[0];
+
+  // ✅ 開盤價
+  const open =
+    meta.regularMarketOpen ??
+    quote.open?.filter((v) => typeof v === "number")[0];
+
+  // ✅ 昨收
+  const prevClose =
+    meta.previousClose ??
+    closes.filter((v) => typeof v === "number")[0];
+
+  if (
+    typeof price !== "number" ||
+    typeof prevClose !== "number"
+  ) {
+    return null;
+  }
+
+  const change = price - prevClose;
+  const changePercent = (change / prevClose) * 100;
 
   return {
-    price: meta.regularMarketPrice,
-    change: meta.regularMarketPrice - meta.previousClose,
-    changePercent:
-      ((meta.regularMarketPrice - meta.previousClose) /
-        meta.previousClose) *
-      100,
-    open: meta.regularMarketOpen,
+    price,
+    open,
+    change,
+    changePercent,
     volume: meta.regularMarketVolume,
   };
 }
