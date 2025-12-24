@@ -1030,24 +1030,36 @@ async function findStock(query) {
 }
 
 async function getStockQuote(symbol) {
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}&region=TW&lang=zh-TW`;
-  const res = await fetch(url);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d`;
+
+  const res = await fetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "application/json",
+    },
+  });
+
   if (!res.ok) {
     const t = await res.text();
-    console.error("Yahoo status", res.status, t.slice(0, 100));
-    return null; // ❗不要 throw
+    console.error("Yahoo chart status", res.status, t.slice(0, 100));
+    return null;
   }
 
   const json = await res.json();
-  const q = json.quoteResponse.result?.[0];
-  if (!q) return null;
+  const result = json.chart?.result?.[0];
+  const meta = result?.meta;
+
+  if (!meta) return null;
 
   return {
-    price: q.regularMarketPrice,
-    change: q.regularMarketChange,
-    changePercent: q.regularMarketChangePercent,
-    open: q.regularMarketOpen,
-    volume: q.regularMarketVolume,
+    price: meta.regularMarketPrice,
+    change: meta.regularMarketPrice - meta.previousClose,
+    changePercent:
+      ((meta.regularMarketPrice - meta.previousClose) /
+        meta.previousClose) *
+      100,
+    open: meta.regularMarketOpen,
+    volume: meta.regularMarketVolume,
   };
 }
 
