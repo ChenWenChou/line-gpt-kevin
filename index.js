@@ -1377,28 +1377,80 @@ app.get("/api/update-stocks", async (req, res) => {
   const url =
     "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data";
 
-  const r = await fetch(url);
+  const r = await fetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "text/csv,application/json;q=0.9,*/*;q=0.8",
+    },
+  });
+
+  const contentType = r.headers.get("content-type") || "";
   const text = await r.text();
 
-  const lines = text.split("\n");
+  // ---- ✅ 診斷：前 3 行 + content-type + 前 120 字 ----
+  const head120 = text.slice(0, 120);
+  const linesRaw = text.split(/\n/).slice(0, 5).map((l) => l.slice(0, 200));
+
+  // 如果根本不是 CSV（常見：HTML 被擋、或回 JSON）
+  const looksLikeHTML = /<html|<!doctype html/i.test(text);
+  const looksLikeJSON = /^\s*[\[{]/.test(text);
+
+  // ---- ✅ 真正 CSV parser：支援引號/逗號/空欄位 ----
+  function parseCsvLine(line) {
+    const s = line.replace(/\r/g, ""); // 重要：去掉 \r
+    const out = [];
+    let cur = "";
+    let inQuotes = false;
+
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+
+      if (inQuotes) {
+        if (ch === '"') {
+          // "" 代表 escaped quote
+          if (s[i + 1] === '"') {
+            cur += '"';
+            i++;
+          } else {
+            inQuotes = false;
+          }
+        } else {
+          cur += ch;
+        }
+      } else {
+        if (ch === '"') inQuotes = true;
+        else if (ch === ",") {
+          out.push(cur);
+          cur = "";
+        } else {
+          cur += ch;
+        }
+      }
+    }
+    out.push(cur);
+    return out.map((x) => x.replace(/^\uFEFF/, "").trim()); // 去 BOM + trim
+  }
+
+  // ---- ✅ 解析 ----
+  const allLines = text.split(/\n/).map((l) => l.trim()).filter(Boolean);
+
+  // 找 header 行（避免前面是空白或 BOM）
+  const headerIndex = allLines.findIndex((l) => l.includes("證券代號") && l.includes("證券名稱"));
+  const startIndex = headerIndex >= 0 ? headerIndex + 1 : 1; // 找不到就假設第 1 行是 header
+
   const stocks = {};
+  const samples = [];
 
-  // 跳過 header
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line || !line.trim()) continue;
+  for (let i = startIndex; i < allLines.length; i++) {
+    const line = allLines[i];
+    if (!line) continue;
 
-    // ✅ 正確處理 CSV + BOM
-    const cols = line
-      .replace(/^\uFEFF/, "")
-      .replace(/^"/, "")
-      .replace(/"$/, "")
-      .split('","');
+    const cols = parseCsvLine(line);
+    const code = (cols[0] || "").replace(/\r/g, "").trim();
+    const name = (cols[1] || "").trim();
 
-    const code = cols[0];
-    const name = cols[1];
+    if (samples.length < 5) samples.push({ codeRaw: cols[0], code, name });
 
-    // 只收 4 碼股票（台股主板）
     if (!/^\d{4}$/.test(code)) continue;
 
     stocks[code] = {
@@ -1410,9 +1462,19 @@ app.get("/api/update-stocks", async (req, res) => {
 
   await redis.set("twse:stocks:all", JSON.stringify(stocks));
 
-  res.json({
+  return res.json({
     ok: true,
     count: Object.keys(stocks).length,
+    debug: {
+      status: r.status,
+      contentType,
+      looksLikeHTML,
+      looksLikeJSON,
+      head120,
+      first5Lines: linesRaw,
+      headerIndex,
+      sampleParsed: samples,
+    },
   });
 });
 
