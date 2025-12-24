@@ -1384,11 +1384,16 @@ app.get("/api/update-stocks", async (req, res) => {
   const stocks = {};
 
   for (const line of lines) {
-    const cols = line.split(",");
-    if (cols.length < 2) continue;
+    if (!line.trim()) continue;
 
-    const code = cols[0]?.trim();
-    const name = cols[1]?.trim();
+    // 去 BOM + 去引號
+    const cols = line
+      .replace(/^\uFEFF/, "")
+      .split('","')
+      .map((s) => s.replace(/"/g, "").trim());
+
+    const code = cols[0];
+    const name = cols[1];
 
     if (!/^\d{4}$/.test(code)) continue;
 
