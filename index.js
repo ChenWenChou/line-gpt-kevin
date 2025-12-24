@@ -1380,21 +1380,25 @@ app.get("/api/update-stocks", async (req, res) => {
   const r = await fetch(url);
   const text = await r.text();
 
-  const lines = text.split("\n").slice(1);
+  const lines = text.split("\n");
   const stocks = {};
 
-  for (const line of lines) {
-    if (!line.trim()) continue;
+  // 跳過 header
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || !line.trim()) continue;
 
-    // 去 BOM + 去引號
+    // ✅ 正確處理 CSV + BOM
     const cols = line
       .replace(/^\uFEFF/, "")
-      .split('","')
-      .map((s) => s.replace(/"/g, "").trim());
+      .replace(/^"/, "")
+      .replace(/"$/, "")
+      .split('","');
 
     const code = cols[0];
     const name = cols[1];
 
+    // 只收 4 碼股票（台股主板）
     if (!/^\d{4}$/.test(code)) continue;
 
     stocks[code] = {
@@ -1406,7 +1410,10 @@ app.get("/api/update-stocks", async (req, res) => {
 
   await redis.set("twse:stocks:all", JSON.stringify(stocks));
 
-  res.json({ ok: true, count: Object.keys(stocks).length });
+  res.json({
+    ok: true,
+    count: Object.keys(stocks).length,
+  });
 });
 
 // Default route
