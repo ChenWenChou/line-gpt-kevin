@@ -1389,7 +1389,10 @@ app.get("/api/update-stocks", async (req, res) => {
 
   // ---- ✅ 診斷：前 3 行 + content-type + 前 120 字 ----
   const head120 = text.slice(0, 120);
-  const linesRaw = text.split(/\n/).slice(0, 5).map((l) => l.slice(0, 200));
+  const linesRaw = text
+    .split(/\n/)
+    .slice(0, 5)
+    .map((l) => l.slice(0, 200));
 
   // 如果根本不是 CSV（常見：HTML 被擋、或回 JSON）
   const looksLikeHTML = /<html|<!doctype html/i.test(text);
@@ -1432,10 +1435,15 @@ app.get("/api/update-stocks", async (req, res) => {
   }
 
   // ---- ✅ 解析 ----
-  const allLines = text.split(/\n/).map((l) => l.trim()).filter(Boolean);
+  const allLines = text
+    .split(/\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
 
   // 找 header 行（避免前面是空白或 BOM）
-  const headerIndex = allLines.findIndex((l) => l.includes("證券代號") && l.includes("證券名稱"));
+  const headerIndex = allLines.findIndex(
+    (l) => l.includes("證券代號") && l.includes("證券名稱")
+  );
   const startIndex = headerIndex >= 0 ? headerIndex + 1 : 1; // 找不到就假設第 1 行是 header
 
   const stocks = {};
@@ -1446,10 +1454,9 @@ app.get("/api/update-stocks", async (req, res) => {
     if (!line) continue;
 
     const cols = parseCsvLine(line);
-    const code = (cols[0] || "").replace(/\r/g, "").trim();
-    const name = (cols[1] || "").trim();
 
-    if (samples.length < 5) samples.push({ codeRaw: cols[0], code, name });
+    const code = (cols[1] || "").trim(); // ✅ 證券代號
+    const name = (cols[2] || "").trim(); // ✅ 證券名稱
 
     if (!/^\d{4}$/.test(code)) continue;
 
