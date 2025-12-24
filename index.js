@@ -1016,12 +1016,12 @@ async function findStock(query) {
   const stocks = JSON.parse(raw);
 
   // 代號
-  if (/^\d{4}$/.test(query)) {
+  if (/^\d{4,6}$/.test(query)) {
     return stocks[query];
   }
 
   // 名稱模糊
-  return Object.values(stocks).find((s) => query.includes(s.name));
+  return Object.values(stocks).find((s) => s.name.includes(query));
 }
 
 async function getStockQuote(symbol) {
@@ -1455,10 +1455,10 @@ app.get("/api/update-stocks", async (req, res) => {
 
     const cols = parseCsvLine(line);
 
-    const code = (cols[1] || "").trim(); // ✅ 證券代號
-    const name = (cols[2] || "").trim(); // ✅ 證券名稱
+    const code = cols[1]?.trim(); // ✅ 證券代號
+    const name = cols[2]?.trim(); // ✅ 證券名稱
 
-    if (!/^\d{4}$/.test(code)) continue;
+    if (!/^\d{4,6}$/.test(code)) continue;
 
     stocks[code] = {
       code,
