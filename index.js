@@ -1163,7 +1163,6 @@ function buildBibleCardFlex({ verse, encouragement, reference }) {
             wrap: true,
             size: "lg",
             weight: "bold",
-            lineSpacing: "md",
           },
           {
             type: "separator",
@@ -1175,7 +1174,6 @@ function buildBibleCardFlex({ verse, encouragement, reference }) {
             wrap: true,
             size: "md",
             color: "#555555",
-            lineSpacing: "md",
           },
           {
             type: "text",
