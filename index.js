@@ -1010,18 +1010,25 @@ async function estimateFoodCalorie(food) {
 // 股市 15分鐘延遲
 
 async function findStock(query) {
+  console.log("findStock query =", query);
   const raw = await redis.get("twse:stocks:all");
   if (!raw) return null;
 
   const stocks = JSON.parse(raw);
 
-  // 代號
-  if (/^\d{4,6}$/.test(query)) {
-    return stocks[query];
+  const q = query.trim();
+
+  // ✅ 1️⃣ 從句子中抓 4~6 碼股票代號（最重要）
+  const codeMatch = q.match(/\b\d{4,6}\b/);
+  if (codeMatch) {
+    const code = codeMatch[0];
+    if (stocks[code]) return stocks[code];
   }
 
-  // 名稱模糊
-  return Object.values(stocks).find((s) => s.name.includes(query));
+  // ✅ 2️⃣ 名稱模糊（台積電 / 鴻海）
+  return Object.values(stocks).find(
+    (s) => q.includes(s.name)
+  ) || null;
 }
 
 async function getStockQuote(symbol) {
