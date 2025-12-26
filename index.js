@@ -60,24 +60,24 @@ const TW_CITY_MAP = {
 const userLastWeatherContext = new Map();
 
 function isGroupAllowed(event) {
-  // 私聊一律放行
-  if (event.source.type !== "group" && event.source.type !== "room") {
+  const sourceType = event.source.type;
+
+  // ① 私聊：一律放行
+  if (sourceType === "user") {
     return true;
   }
 
-  // 群組只處理文字
-  if (event.message?.type !== "text") return false;
+  // ② 群組 / room：只處理文字
+  if (sourceType === "group" || sourceType === "room") {
+    if (event.message?.type !== "text") return false;
 
-  const text = event.message.text || "";
-  const mentionees = event.message?.mention?.mentionees || [];
+    const text = event.message.text.trim();
 
-  const mentionedBot = mentionees.some(
-    (m) => m.userId === BOT_USER_ID
-  );
+    // ✅ 只認「明確叫我」
+    return /^(助理|KevinBot|kevinbot)\b/i.test(text);
+  }
 
-  const calledByName = /^(助理|KevinBot|kevinbot)\b/i.test(text.trim());
-
-  return mentionedBot || calledByName;
+  return false;
 }
 
 function stripBotName(text = "") {
