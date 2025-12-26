@@ -1083,6 +1083,11 @@ async function getStockQuote(symbol) {
   };
 }
 
+
+function fmtTWPrice(n) {
+  if (typeof n !== "number") return "--";
+  return n >= 100 ? n.toFixed(1) : n.toFixed(2);
+}
 // 聖經小卡（50 節，適合每日抽）
 const BIBLE_VERSES = [
   { ref: "約翰福音 3:16" },
@@ -1445,10 +1450,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
           const text = `📊 ${stock.name}（${stock.code}）
 
-現價：${q.price}
-漲跌：${sign}${q.change.toFixed(2)}（${sign}${percent}%）
-開盤：${q.open}
-成交量：${q.volume?.toLocaleString()} 張
+現價：${fmtTWPrice(q.price)}
+漲跌：${sign}${fmtTWPrice(q.change)}（${sign}${percent}%）
+開盤：${fmtTWPrice(q.open)}
+成交量：${q.volume?.toLocaleString() ?? "--"} 張
 
 ※ 資料來源：Yahoo Finance（延遲報價）`;
 
