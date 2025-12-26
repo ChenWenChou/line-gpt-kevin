@@ -59,6 +59,27 @@ const TW_CITY_MAP = {
 // 簡單記憶：userId -> { city, lat, lon }
 const userLastWeatherContext = new Map();
 
+function isGroupAllowed(event) {
+  // 私聊一律放行
+  if (event.source.type !== "group" && event.source.type !== "room") {
+    return true;
+  }
+
+  // 群組只處理文字
+  if (event.message?.type !== "text") return false;
+
+  const text = event.message.text || "";
+  const mentionees = event.message?.mention?.mentionees || [];
+
+  const mentionedBot = mentionees.some(
+    (m) => m.userId === BOT_USER_ID
+  );
+
+  const calledByName = /^(助理|KevinBot|kevinbot)\b/i.test(text.trim());
+
+  return mentionedBot || calledByName;
+}
+
 function stripBotName(text = "") {
   return text.replace(/^(助理|KevinBot|kevinbot)\s*/i, "").trim();
 }
@@ -1317,22 +1338,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       // ─────────────────────────────────────
       // 0️⃣ 群組 / 房間 gate（最外層）
       // ─────────────────────────────────────
-      if (event.source.type === "group" || event.source.type === "room") {
-        const mention = event.message?.mention;
-        const mentionedBot = mention?.mentionees?.some(
-          (m) => m.userId === BOT_USER_ID
-        );
-
-        const userMessage =
-          event.message.type === "text" ? event.message.text.trim() : "";
-
-        const calledByName =
-          userMessage.includes("助理") ||
-          userMessage.includes("KevinBot") ||
-          userMessage.includes("kevinbot");
-
-        if (!mentionedBot && !calledByName) continue;
-      }
+      if (!isGroupAllowed(event)) continue;
 
       // ─────────────────────────────────────
       // 1️⃣ location message（最高優先）
