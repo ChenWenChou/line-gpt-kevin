@@ -74,7 +74,7 @@ function isGroupAllowed(event) {
     const text = event.message.text.trim();
 
     // ✅ 只認「明確叫我」
-    return /^(助理|KevinBot|kevinbot)\b/i.test(text);
+    return /^\s*(助理|KevinBot|kevinbot)/i.test(text);
   }
 
   return false;
