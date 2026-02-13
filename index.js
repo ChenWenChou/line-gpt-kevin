@@ -33,6 +33,13 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+const OPENCLAW_CHAT_URL =
+  process.env.OPENCLAW_CHAT_URL ||
+  "https://phase-layers-everything-forest.trycloudflare.com/v1/chat/completions";
+const OPENCLAW_API_KEY = process.env.OPENCLAW_API_KEY;
+const OPENCLAW_MODEL = process.env.OPENCLAW_MODEL || "openai/gpt-5-mini";
+const OPENCLAW_TIMEOUT_MS = Number(process.env.OPENCLAW_TIMEOUT_MS || 8000);
+
 const WHEN_LABEL = {
   today: "今日",
   tomorrow: "明日",
@@ -1277,6 +1284,112 @@ async function generateBibleCardForDate(dateKey) {
   return payload;
 }
 
+function extractAssistantText(payload) {
+  if (!payload) return null;
+
+  if (typeof payload === "string") {
+    const t = payload.trim();
+    return t || null;
+  }
+
+  const fromChoices = payload?.choices?.[0]?.message?.content;
+  if (typeof fromChoices === "string" && fromChoices.trim()) {
+    return fromChoices.trim();
+  }
+  if (Array.isArray(fromChoices)) {
+    const text = fromChoices
+      .map((x) => (typeof x?.text === "string" ? x.text : ""))
+      .join("")
+      .trim();
+    if (text) return text;
+  }
+
+  const fromOutputText = payload?.output_text;
+  if (typeof fromOutputText === "string" && fromOutputText.trim()) {
+    return fromOutputText.trim();
+  }
+
+  const fromSimple = payload?.reply ?? payload?.text ?? payload?.message;
+  if (typeof fromSimple === "string" && fromSimple.trim()) {
+    return fromSimple.trim();
+  }
+
+  return null;
+}
+
+async function getGeneralAssistantReply(userText) {
+  const systemPrompt =
+    "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot。";
+
+  if (OPENCLAW_CHAT_URL) {
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      Number.isFinite(OPENCLAW_TIMEOUT_MS) ? OPENCLAW_TIMEOUT_MS : 8000
+    );
+
+    try {
+      const headers = {
+        "content-type": "application/json",
+      };
+      if (OPENCLAW_API_KEY) {
+        headers.authorization = `Bearer ${OPENCLAW_API_KEY}`;
+      }
+
+      const payload = {
+        model: OPENCLAW_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userText },
+        ],
+      };
+
+      const r = await fetch(OPENCLAW_CHAT_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      const raw = await r.text();
+
+      if (!r.ok) {
+        throw new Error(
+          `OpenClaw HTTP ${r.status}: ${(raw || "").slice(0, 200)}`
+        );
+      }
+
+      let json;
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        throw new Error(`OpenClaw 回傳不是 JSON: ${(raw || "").slice(0, 200)}`);
+      }
+
+      const text = extractAssistantText(json);
+      if (text) return { text, provider: "openclaw" };
+
+      throw new Error("OpenClaw 回傳找不到文字內容");
+    } catch (err) {
+      console.error("OpenClaw failed, fallback to OpenAI:", err?.message || err);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const reply = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userText },
+    ],
+  });
+
+  return {
+    text: reply.choices?.[0]?.message?.content?.trim() || "我剛剛斷線了，再說一次",
+    provider: "openai",
+  };
+}
+
 app.post("/api/generate-bible-cards", async (req, res) => {
   if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
     return res.status(401).json({ error: "unauthorized" });
@@ -1632,23 +1745,14 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       }
 
       // ─────────────────────────────────────
-      // 5️⃣ 一般聊天 GPT
+      // 5️⃣ 一般聊天（優先 OpenClaw，失敗 fallback OpenAI）
       // ─────────────────────────────────────
-      const reply = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot，由 OpenAI API 驅動。",
-          },
-          { role: "user", content: parsedMessage },
-        ],
-      });
+      const reply = await getGeneralAssistantReply(parsedMessage);
+      console.log("chat provider:", reply.provider);
 
       await client.replyMessage(event.replyToken, {
         type: "text",
-        text: reply.choices[0].message.content,
+        text: reply.text,
       });
     } catch (err) {
       console.error("Error handling event:", err);
