@@ -9,6 +9,11 @@ import path from "path";
 import Redis from "ioredis";
 
 const REDIS_URL = process.env.REDIS_URL;
+const REDIS_ERROR_COOLDOWN_MS = Number(
+  process.env.REDIS_ERROR_COOLDOWN_MS || 30000
+);
+let redisUnavailableUntil = 0;
+let redisLastErrorAt = 0;
 const redisClient = REDIS_URL
   ? new Redis(REDIS_URL, {
       lazyConnect: true,
@@ -23,45 +28,83 @@ const redisClient = REDIS_URL
 
 if (redisClient) {
   redisClient.on("error", (err) => {
-    console.error("[redis] connection error:", err?.message || err);
+    const now = Date.now();
+    if (now - redisLastErrorAt > 10000) {
+      console.error("[redis] connection error:", err?.message || err);
+      redisLastErrorAt = now;
+    }
   });
 }
 
+function markRedisUnavailable(err, hint = "operation failed") {
+  redisUnavailableUntil = Date.now() + REDIS_ERROR_COOLDOWN_MS;
+  const now = Date.now();
+  if (now - redisLastErrorAt > 10000) {
+    console.error(`[redis] ${hint}:`, err?.message || err);
+    redisLastErrorAt = now;
+  }
+}
+
+async function ensureRedisReady() {
+  if (!redisClient) return false;
+  if (Date.now() < redisUnavailableUntil) return false;
+
+  if (redisClient.status === "ready") return true;
+  if (redisClient.status === "connect") return true;
+  if (redisClient.status === "connecting") return true;
+  if (redisClient.status === "reconnecting") return false;
+
+  try {
+    await redisClient.connect();
+    return true;
+  } catch (err) {
+    const msg = String(err?.message || err || "");
+    if (/already\s+(connecting|connected)/i.test(msg)) {
+      return true;
+    }
+    markRedisUnavailable(err, "connect failed");
+    return false;
+  }
+}
+
 async function redisGet(key) {
-  if (!redisClient) return null;
+  if (!(await ensureRedisReady())) return null;
   try {
     return await redisClient.get(key);
   } catch (err) {
-    console.error(`[redis] GET failed (${key}):`, err?.message || err);
+    markRedisUnavailable(err, `GET failed (${key})`);
     return null;
   }
 }
 
 async function redisSet(key, value, ...args) {
-  if (!redisClient) return false;
+  if (!(await ensureRedisReady())) return false;
   try {
     await redisClient.set(key, value, ...args);
     return true;
   } catch (err) {
-    console.error(`[redis] SET failed (${key}):`, err?.message || err);
+    markRedisUnavailable(err, `SET failed (${key})`);
     return false;
   }
 }
 
 async function redisSetNx(key, value, ttlSeconds) {
-  if (!redisClient) return null;
+  if (!(await ensureRedisReady())) return null;
   try {
     const ttl =
       Number.isFinite(ttlSeconds) && ttlSeconds > 0 ? ttlSeconds : 10 * 60;
     const result = await redisClient.set(key, value, "EX", ttl, "NX");
     return result === "OK";
   } catch (err) {
-    console.error(`[redis] SET NX failed (${key}):`, err?.message || err);
+    markRedisUnavailable(err, `SET NX failed (${key})`);
     return null;
   }
 }
 
 const LINE_TEXT_LIMIT = 5000;
+const LINE_SKIP_REDELIVERY = !/^(0|false|no)$/i.test(
+  process.env.LINE_SKIP_REDELIVERY || "true"
+);
 const LINE_EVENT_DEDUP_TTL_SECONDS = Number(
   process.env.LINE_EVENT_DEDUP_TTL_SECONDS || 10 * 60
 );
@@ -162,7 +205,7 @@ async function replyMessageWithFallback(event, messages) {
         console.warn(
           "reply token invalid on redelivery event, skip push fallback"
         );
-        throw err;
+        return;
       }
       const targetId = getLinePushTargetId(event);
       if (targetId) {
@@ -178,6 +221,8 @@ async function replyMessageWithFallback(event, messages) {
           });
         }
       }
+      console.warn("reply token invalid, no push fallback target");
+      return;
     }
 
     throw err;
@@ -1703,6 +1748,13 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
   for (const event of events) {
     try {
       if (event.type !== "message") continue;
+      if (LINE_SKIP_REDELIVERY && event?.deliveryContext?.isRedelivery) {
+        console.log("skip LINE redelivery event", {
+          webhookEventId: event?.webhookEventId || null,
+          messageId: event?.message?.id || null,
+        });
+        continue;
+      }
 
       const shouldProcess = await shouldProcessLineEvent(event);
       if (!shouldProcess) {
@@ -2022,6 +2074,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         text: reply.text,
       });
     } catch (err) {
+      if (isInvalidReplyTokenError(err)) {
+        console.warn("skip invalid reply token event");
+        continue;
+      }
       console.error("Error handling event:", err);
     }
   }
