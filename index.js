@@ -164,12 +164,15 @@ const openai = new OpenAI({
 const OPENCLAW_CHAT_URL = process.env.OPENCLAW_CHAT_URL;
 const OPENCLAW_API_KEY = process.env.OPENCLAW_API_KEY;
 const OPENCLAW_MODEL = process.env.OPENCLAW_MODEL || "openai/gpt-5-mini";
-const OPENCLAW_TIMEOUT_MS = Number(process.env.OPENCLAW_TIMEOUT_MS || 8000);
+const OPENCLAW_TIMEOUT_MS = Number(process.env.OPENCLAW_TIMEOUT_MS || 20000);
 const OPENCLAW_REQUEST_CONTENT_TYPE =
   process.env.OPENCLAW_REQUEST_CONTENT_TYPE ||
   (OPENCLAW_CHAT_URL?.includes(".up.railway.app")
     ? "text/plain"
     : "application/json");
+const OPENCLAW_FORCE_ONLY = /^(1|true|yes)$/i.test(
+  process.env.OPENCLAW_FORCE_ONLY || ""
+);
 
 const WHEN_LABEL = {
   today: "今日",
@@ -1501,6 +1504,7 @@ async function getGeneralAssistantReply(userText) {
     try {
       const headers = {
         "content-type": OPENCLAW_REQUEST_CONTENT_TYPE,
+        accept: "application/json",
       };
       if (OPENCLAW_API_KEY) {
         headers.authorization = `Bearer ${OPENCLAW_API_KEY}`;
@@ -1508,6 +1512,7 @@ async function getGeneralAssistantReply(userText) {
 
       const payload = {
         model: OPENCLAW_MODEL,
+        stream: false,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userText },
@@ -1540,10 +1545,29 @@ async function getGeneralAssistantReply(userText) {
 
       throw new Error("OpenClaw 回傳找不到文字內容");
     } catch (err) {
-      console.error("OpenClaw failed, fallback to OpenAI:", err?.message || err);
+      const reason = err?.message || String(err);
+      console.error("OpenClaw failed:", {
+        reason,
+        url: OPENCLAW_CHAT_URL,
+        model: OPENCLAW_MODEL,
+        timeoutMs: OPENCLAW_TIMEOUT_MS,
+        contentType: OPENCLAW_REQUEST_CONTENT_TYPE,
+      });
+      if (OPENCLAW_FORCE_ONLY) {
+        return {
+          text: `OpenClaw 暫時不可用（${reason.slice(0, 80)}），請稍後再試。`,
+          provider: "openclaw_error",
+        };
+      }
+      console.error("fallback to OpenAI");
     } finally {
       clearTimeout(timer);
     }
+  } else if (OPENCLAW_FORCE_ONLY) {
+    return {
+      text: "OpenClaw 未設定（OPENCLAW_CHAT_URL 缺失），請先修正環境變數。",
+      provider: "openclaw_error",
+    };
   }
 
   const reply = await openai.chat.completions.create({
