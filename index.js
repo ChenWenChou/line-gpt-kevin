@@ -8,7 +8,45 @@ import path from "path";
 // 星座 會用到 Redis  資料庫
 import Redis from "ioredis";
 
-const redis = new Redis(process.env.REDIS_URL);
+const REDIS_URL = process.env.REDIS_URL;
+const redisClient = REDIS_URL
+  ? new Redis(REDIS_URL, {
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 1,
+      connectTimeout: Number(process.env.REDIS_CONNECT_TIMEOUT_MS || 1500),
+      retryStrategy(times) {
+        return Math.min(times * 200, 2000);
+      },
+    })
+  : null;
+
+if (redisClient) {
+  redisClient.on("error", (err) => {
+    console.error("[redis] connection error:", err?.message || err);
+  });
+}
+
+async function redisGet(key) {
+  if (!redisClient) return null;
+  try {
+    return await redisClient.get(key);
+  } catch (err) {
+    console.error(`[redis] GET failed (${key}):`, err?.message || err);
+    return null;
+  }
+}
+
+async function redisSet(key, value, ...args) {
+  if (!redisClient) return false;
+  try {
+    await redisClient.set(key, value, ...args);
+    return true;
+  } catch (err) {
+    console.error(`[redis] SET failed (${key}):`, err?.message || err);
+    return false;
+  }
+}
 
 const __dirname = new URL(".", import.meta.url).pathname;
 const mazuLots = JSON.parse(
@@ -80,7 +118,7 @@ async function getLastWeatherContext(userId) {
   if (!key) return null;
 
   try {
-    const raw = await redis.get(key);
+    const raw = await redisGet(key);
     if (!raw) return null;
     return JSON.parse(raw);
   } catch (err) {
@@ -94,7 +132,7 @@ async function setLastWeatherContext(userId, payload) {
   if (!key || !payload) return;
 
   try {
-    await redis.set(
+    await redisSet(
       key,
       JSON.stringify(payload),
       "EX",
@@ -962,7 +1000,7 @@ async function getDailyHoroscope(signZh, when = "today") {
   const kvKey = `horoscope:v5:${date}:${sign}`;
 
   // ① 先查 KV
-  const cached = await redis.get(kvKey);
+  const cached = await redisGet(kvKey);
   if (cached) return JSON.parse(cached);
 
   // ② 沒有才問 GPT（只會發生一次）
@@ -1019,7 +1057,7 @@ async function getDailyHoroscope(signZh, when = "today") {
   };
 
   // ③ 存 KV（一天）
-  await redis.set(kvKey, JSON.stringify(payload), "EX", 60 * 60 * 24);
+  await redisSet(kvKey, JSON.stringify(payload), "EX", 60 * 60 * 24);
 
   return payload;
 }
@@ -1039,7 +1077,7 @@ async function estimateFoodCalorie(food) {
   const today = getTodayKey(0);
   const key = `food:estimate:${today}:${food}`;
 
-  const cached = await redis.get(key);
+  const cached = await redisGet(key);
   if (cached) return JSON.parse(cached);
 
   const res = await openai.chat.completions.create({
@@ -1072,7 +1110,7 @@ async function estimateFoodCalorie(food) {
 
   const data = JSON.parse(res.choices[0].message.content);
 
-  await redis.set(key, JSON.stringify(data), "EX", 60 * 60 * 24);
+  await redisSet(key, JSON.stringify(data), "EX", 60 * 60 * 24);
 
   return data;
 }
@@ -1081,7 +1119,7 @@ async function estimateFoodCalorie(food) {
 
 async function findStock(query) {
   console.log("findStock query =", query);
-  const raw = await redis.get("twse:stocks:all");
+  const raw = await redisGet("twse:stocks:all");
   if (!raw) return null;
 
   const stocks = JSON.parse(raw);
@@ -1279,7 +1317,7 @@ async function fetchBibleVerse(ref) {
 }
 async function getTodayBibleCard() {
   const key = `bible:card:${new Date().toISOString().slice(0, 10)}`;
-  const raw = await redis.get(key);
+  const raw = await redisGet(key);
   return raw ? JSON.parse(raw) : null;
 }
 async function generateEncouragement(verseText) {
@@ -1316,7 +1354,7 @@ async function generateBibleCardForDate(dateKey) {
     reference: verseData.reference,
   };
 
-  await redis.set(
+  await redisSet(
     `bible:card:${dateKey}`,
     JSON.stringify(payload),
     "EX",
@@ -1448,7 +1486,7 @@ app.post("/api/generate-bible-cards", async (req, res) => {
     const redisKey = `bible:card:${dateKey}`;
 
     // ✅ 已存在就跳過
-    const exists = await redis.get(redisKey);
+    const exists = await redisGet(redisKey);
     if (exists) {
       skipped++;
       continue;
@@ -1466,7 +1504,7 @@ app.post("/api/generate-bible-cards", async (req, res) => {
       reference: verseData.reference,
     };
 
-    await redis.set(
+    await redisSet(
       redisKey,
       JSON.stringify(payload),
       "EX",
@@ -1903,7 +1941,7 @@ app.get("/api/update-stocks", async (req, res) => {
     };
   }
 
-  await redis.set("twse:stocks:all", JSON.stringify(stocks));
+  await redisSet("twse:stocks:all", JSON.stringify(stocks));
 
   return res.json({
     ok: true,
