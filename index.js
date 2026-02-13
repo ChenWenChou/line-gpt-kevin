@@ -48,7 +48,24 @@ async function redisSet(key, value, ...args) {
   }
 }
 
+async function redisSetNx(key, value, ttlSeconds) {
+  if (!redisClient) return null;
+  try {
+    const ttl =
+      Number.isFinite(ttlSeconds) && ttlSeconds > 0 ? ttlSeconds : 10 * 60;
+    const result = await redisClient.set(key, value, "EX", ttl, "NX");
+    return result === "OK";
+  } catch (err) {
+    console.error(`[redis] SET NX failed (${key}):`, err?.message || err);
+    return null;
+  }
+}
+
 const LINE_TEXT_LIMIT = 5000;
+const LINE_EVENT_DEDUP_TTL_SECONDS = Number(
+  process.env.LINE_EVENT_DEDUP_TTL_SECONDS || 10 * 60
+);
+const lineEventMemoryDedup = new Map();
 
 function normalizeLineMessage(msg) {
   if (!msg || typeof msg !== "object") return msg;
@@ -87,6 +104,45 @@ function getLinePushTargetId(event) {
   );
 }
 
+function getLineEventDedupKey(event) {
+  if (event?.webhookEventId) return `line:event:${event.webhookEventId}`;
+
+  const sourceId =
+    event?.source?.userId || event?.source?.groupId || event?.source?.roomId;
+  const messageId = event?.message?.id;
+  const timestamp = event?.timestamp;
+  if (!sourceId || !messageId || !timestamp) return null;
+  return `line:event:fallback:${sourceId}:${messageId}:${timestamp}`;
+}
+
+function cleanupLineEventMemoryDedup(now = Date.now()) {
+  for (const [key, expiresAt] of lineEventMemoryDedup.entries()) {
+    if (expiresAt <= now) lineEventMemoryDedup.delete(key);
+  }
+}
+
+async function shouldProcessLineEvent(event) {
+  const key = getLineEventDedupKey(event);
+  if (!key) return true;
+
+  const ttl =
+    Number.isFinite(LINE_EVENT_DEDUP_TTL_SECONDS) &&
+    LINE_EVENT_DEDUP_TTL_SECONDS > 0
+      ? LINE_EVENT_DEDUP_TTL_SECONDS
+      : 10 * 60;
+  const now = Date.now();
+
+  cleanupLineEventMemoryDedup(now);
+  const inMemoryUntil = lineEventMemoryDedup.get(key);
+  if (inMemoryUntil && inMemoryUntil > now) return false;
+
+  const redisAcquired = await redisSetNx(key, "1", ttl);
+  if (redisAcquired === false) return false;
+
+  lineEventMemoryDedup.set(key, now + ttl * 1000);
+  return true;
+}
+
 async function replyMessageWithFallback(event, messages) {
   const safeMessages = normalizeLineMessages(messages);
 
@@ -102,6 +158,12 @@ async function replyMessageWithFallback(event, messages) {
     });
 
     if (isInvalidReplyTokenError(err)) {
+      if (event?.deliveryContext?.isRedelivery) {
+        console.warn(
+          "reply token invalid on redelivery event, skip push fallback"
+        );
+        throw err;
+      }
       const targetId = getLinePushTargetId(event);
       if (targetId) {
         try {
@@ -1641,6 +1703,16 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
   for (const event of events) {
     try {
       if (event.type !== "message") continue;
+
+      const shouldProcess = await shouldProcessLineEvent(event);
+      if (!shouldProcess) {
+        console.log("skip duplicated LINE event", {
+          webhookEventId: event?.webhookEventId || null,
+          messageId: event?.message?.id || null,
+          isRedelivery: Boolean(event?.deliveryContext?.isRedelivery),
+        });
+        continue;
+      }
 
       // ─────────────────────────────────────
       // 0️⃣ 群組 / 房間 gate（最外層）
