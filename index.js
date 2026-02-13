@@ -48,6 +48,96 @@ async function redisSet(key, value, ...args) {
   }
 }
 
+const LINE_TEXT_LIMIT = 5000;
+
+function normalizeLineMessage(msg) {
+  if (!msg || typeof msg !== "object") return msg;
+  if (msg.type !== "text" || typeof msg.text !== "string") return msg;
+  if (msg.text.length <= LINE_TEXT_LIMIT) return msg;
+  return {
+    ...msg,
+    text: `${msg.text.slice(0, LINE_TEXT_LIMIT - 3)}...`,
+  };
+}
+
+function normalizeLineMessages(messages) {
+  if (Array.isArray(messages)) {
+    return messages.slice(0, 5).map(normalizeLineMessage);
+  }
+  return normalizeLineMessage(messages);
+}
+
+function getLineErrorData(err) {
+  return err?.originalError?.response?.data || err?.response?.data || null;
+}
+
+function isInvalidReplyTokenError(err) {
+  if (Number(err?.statusCode) !== 400) return false;
+  const data = getLineErrorData(err);
+  const detailText = Array.isArray(data?.details)
+    ? data.details.map((d) => d?.message || "").join(" ")
+    : "";
+  const text = `${data?.message || ""} ${detailText}`.toLowerCase();
+  return text.includes("reply token");
+}
+
+function getLinePushTargetId(event) {
+  return (
+    event?.source?.userId || event?.source?.groupId || event?.source?.roomId || null
+  );
+}
+
+async function replyMessageWithFallback(event, messages) {
+  const safeMessages = normalizeLineMessages(messages);
+
+  try {
+    await client.replyMessage(event.replyToken, safeMessages);
+    return;
+  } catch (err) {
+    const data = getLineErrorData(err);
+    console.error("LINE replyMessage failed:", {
+      statusCode: err?.statusCode,
+      statusMessage: err?.statusMessage,
+      data,
+    });
+
+    if (isInvalidReplyTokenError(err)) {
+      const targetId = getLinePushTargetId(event);
+      if (targetId) {
+        try {
+          await client.pushMessage(targetId, safeMessages);
+          console.warn("reply token invalid, fallback to pushMessage success");
+          return;
+        } catch (pushErr) {
+          console.error("pushMessage fallback failed:", {
+            statusCode: pushErr?.statusCode,
+            statusMessage: pushErr?.statusMessage,
+            data: getLineErrorData(pushErr),
+          });
+        }
+      }
+    }
+
+    throw err;
+  }
+}
+
+function isReplyEvent(target) {
+  return Boolean(
+    target &&
+      typeof target === "object" &&
+      typeof target.replyToken === "string"
+  );
+}
+
+async function sendLineReply(target, messages) {
+  const safeMessages = normalizeLineMessages(messages);
+  if (isReplyEvent(target)) {
+    return replyMessageWithFallback(target, safeMessages);
+  }
+  return client.replyMessage(target, safeMessages);
+}
+
 const __dirname = new URL(".", import.meta.url).pathname;
 const mazuLots = JSON.parse(
   fs.readFileSync(path.join(__dirname, "mazu_lots.json"), "utf8")
@@ -769,10 +859,10 @@ async function getWeatherAndOutfit({
   }
 }
 
-async function replyWeather(replyToken, result) {
+async function replyWeather(replyTarget, result) {
   // 如果整個 result 就是錯誤字串 → 直接回文字
   if (!result || typeof result === "string" || !result.data) {
-    await client.replyMessage(replyToken, {
+    await sendLineReply(replyTarget, {
       type: "text",
       text: typeof result === "string" ? result : "天氣資料取得失敗",
     });
@@ -781,11 +871,11 @@ async function replyWeather(replyToken, result) {
 
   // 嘗試送 Flex
   try {
-    await client.replyMessage(replyToken, buildWeatherFlex(result.data));
+    await sendLineReply(replyTarget, buildWeatherFlex(result.data));
     return;
   } catch (err) {
     console.error("Flex 回傳失敗，fallback 文字", err);
-    await client.replyMessage(replyToken, {
+    await sendLineReply(replyTarget, {
       type: "text",
       text: result.text,
     });
@@ -1552,7 +1642,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           lon: longitude,
         });
 
-        await replyWeather(event.replyToken, result);
+        await replyWeather(event, result);
         continue;
       }
 
@@ -1575,7 +1665,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           advice,
         });
 
-        await client.replyMessage(event.replyToken, flex);
+        await replyMessageWithFallback(event, flex);
         continue;
       }
       // ─────────────────────────────────────
@@ -1585,7 +1675,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         const foods = parseFoodList(userMessage);
 
         if (foods.length === 0) {
-          await client.replyMessage(event.replyToken, {
+          await replyMessageWithFallback(event, {
             type: "text",
             text: "你吃了什麼？可以一次列多道菜喔 😄",
           });
@@ -1612,7 +1702,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         lines.push(`👉 總熱量：約 ${totalMin}～${totalMax} 大卡`);
         lines.push("※ 快速估算，非精準營養計算");
 
-        await client.replyMessage(event.replyToken, {
+        await replyMessageWithFallback(event, {
           type: "text",
           text: lines.join("\n"),
         });
@@ -1630,7 +1720,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         const stock = await findStock(cleaned);
 
         if (!stock) {
-          await client.replyMessage(event.replyToken, {
+          await replyMessageWithFallback(event, {
             type: "text",
             text: "我找不到這檔股票 😅\n可以試試「2330 行情」或「台積電 股價」",
           });
@@ -1656,13 +1746,13 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
 ※ 資料來源：Yahoo Finance（延遲報價）`;
 
-          await client.replyMessage(event.replyToken, {
+          await replyMessageWithFallback(event, {
             type: "text",
             text,
           });
         } catch (err) {
           console.error("Stock error:", err);
-          await client.replyMessage(event.replyToken, {
+          await replyMessageWithFallback(event, {
             type: "text",
             text: "股價資料暫時取得失敗，請稍後再試。",
           });
@@ -1685,7 +1775,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         }
 
         const flex = buildBibleCardFlex(card);
-        await client.replyMessage(event.replyToken, flex);
+        await replyMessageWithFallback(event, flex);
         continue;
       }
 
@@ -1711,7 +1801,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         const result = await getDailyHoroscope(signZh, when);
 
         if (!result) {
-          await client.replyMessage(event.replyToken, {
+          await replyMessageWithFallback(event, {
             type: "text",
             text: "這個星座我暫時還看不懂，再試一次？",
           });
@@ -1727,7 +1817,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           data: result,
         });
 
-        await client.replyMessage(event.replyToken, flex);
+        await replyMessageWithFallback(event, flex);
 
         continue;
       }
@@ -1749,7 +1839,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             lon: last.lon,
           });
 
-          await replyWeather(event.replyToken, result);
+          await replyWeather(event, result);
           continue;
         }
       }
@@ -1780,7 +1870,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           lon: island?.lon,
         });
 
-        await replyWeather(event.replyToken, result);
+        await replyWeather(event, result);
         continue;
       }
 
@@ -1821,7 +1911,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           lon: island?.lon,
         });
 
-        await replyWeather(event.replyToken, result);
+        await replyWeather(event, result);
         continue;
       }
 
@@ -1831,7 +1921,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       const reply = await getGeneralAssistantReply(parsedMessage);
       console.log("chat provider:", reply.provider);
 
-      await client.replyMessage(event.replyToken, {
+      await replyMessageWithFallback(event, {
         type: "text",
         text: reply.text,
       });
