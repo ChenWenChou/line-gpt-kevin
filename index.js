@@ -33,12 +33,15 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const OPENCLAW_CHAT_URL =
-  process.env.OPENCLAW_CHAT_URL ||
-  "https://phase-layers-everything-forest.trycloudflare.com/v1/chat/completions";
+const OPENCLAW_CHAT_URL = process.env.OPENCLAW_CHAT_URL;
 const OPENCLAW_API_KEY = process.env.OPENCLAW_API_KEY;
 const OPENCLAW_MODEL = process.env.OPENCLAW_MODEL || "openai/gpt-5-mini";
 const OPENCLAW_TIMEOUT_MS = Number(process.env.OPENCLAW_TIMEOUT_MS || 8000);
+const OPENCLAW_REQUEST_CONTENT_TYPE =
+  process.env.OPENCLAW_REQUEST_CONTENT_TYPE ||
+  (OPENCLAW_CHAT_URL?.includes(".up.railway.app")
+    ? "text/plain"
+    : "application/json");
 
 const WHEN_LABEL = {
   today: "今日",
@@ -63,8 +66,47 @@ const TW_CITY_MAP = {
   台東: "Taitung",
   臺東: "Taitung",
 };
-// 簡單記憶：userId -> { city, lat, lon }
-const userLastWeatherContext = new Map();
+const WEATHER_CONTEXT_TTL_SECONDS = Number(
+  process.env.WEATHER_CONTEXT_TTL_SECONDS || 60 * 60 * 24
+);
+
+function getWeatherContextKey(userId) {
+  if (!userId) return null;
+  return `weather:last:${userId}`;
+}
+
+async function getLastWeatherContext(userId) {
+  const key = getWeatherContextKey(userId);
+  if (!key) return null;
+
+  try {
+    const raw = await redis.get(key);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error("getLastWeatherContext error:", err);
+    return null;
+  }
+}
+
+async function setLastWeatherContext(userId, payload) {
+  const key = getWeatherContextKey(userId);
+  if (!key || !payload) return;
+
+  try {
+    await redis.set(
+      key,
+      JSON.stringify(payload),
+      "EX",
+      Number.isFinite(WEATHER_CONTEXT_TTL_SECONDS) &&
+        WEATHER_CONTEXT_TTL_SECONDS > 0
+        ? WEATHER_CONTEXT_TTL_SECONDS
+        : 60 * 60 * 24
+    );
+  } catch (err) {
+    console.error("setLastWeatherContext error:", err);
+  }
+}
 
 function isGroupAllowed(event) {
   const sourceType = event.source.type;
@@ -1330,7 +1372,7 @@ async function getGeneralAssistantReply(userText) {
 
     try {
       const headers = {
-        "content-type": "application/json",
+        "content-type": OPENCLAW_REQUEST_CONTENT_TYPE,
       };
       if (OPENCLAW_API_KEY) {
         headers.authorization = `Bearer ${OPENCLAW_API_KEY}`;
@@ -1466,7 +1508,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           when: "today",
         });
 
-        userLastWeatherContext.set(event.source.userId, {
+        await setLastWeatherContext(event.source.userId, {
           city: address,
           lat: latitude,
           lon: longitude,
@@ -1588,7 +1630,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           });
         }
 
-        return; // 🔴 非常重要
+        continue; // 🔴 非常重要
       }
 
       // ─────────────────────────────────────
@@ -1658,7 +1700,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       const onlyWhen = /^(那)?(今天|明天|後天)(呢|啊)?$/.test(userMessage);
 
       if (onlyWhen) {
-        const last = userLastWeatherContext.get(userId);
+        const last = await getLastWeatherContext(userId);
         if (last) {
           const when = normalizeWhen(userMessage);
 
@@ -1680,8 +1722,9 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       const quick = quickWeatherParse(userMessage);
 
       if (quick) {
+        const last = await getLastWeatherContext(userId);
         const cityClean = cleanCity(
-          quick.city || userLastWeatherContext.get(userId)?.city
+          quick.city || last?.city
         );
         const island = findTaiwanIsland(cityClean);
         const city = island ? island.name : fixTaiwanCity(cityClean);
@@ -1693,7 +1736,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           lon: island?.lon,
         });
 
-        userLastWeatherContext.set(userId, {
+        await setLastWeatherContext(userId, {
           city,
           lat: island?.lat,
           lon: island?.lon,
@@ -1734,7 +1777,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           lon: island?.lon,
         });
 
-        userLastWeatherContext.set(userId, {
+        await setLastWeatherContext(userId, {
           city: island ? island.name : cityClean,
           lat: island?.lat,
           lon: island?.lon,
