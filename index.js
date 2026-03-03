@@ -332,6 +332,9 @@ const CHAT_HISTORY_TTL_SECONDS = Number(
 const CHAT_HISTORY_MAX_CHARS = Number(
   process.env.CHAT_HISTORY_MAX_CHARS || 500
 );
+const GENERAL_REPLY_MAX_CHARS = Number(
+  process.env.GENERAL_REPLY_MAX_CHARS || 260
+);
 const localChatHistory = new Map();
 
 function getWeatherContextKey(userId) {
@@ -416,6 +419,35 @@ function trimChatHistory(raw) {
   const maxMessages = getChatHistoryMaxMessages();
   if (messages.length <= maxMessages) return messages;
   return messages.slice(messages.length - maxMessages);
+}
+
+function compactGeneralReply(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return raw;
+
+  const maxChars =
+    Number.isFinite(GENERAL_REPLY_MAX_CHARS) && GENERAL_REPLY_MAX_CHARS > 0
+      ? GENERAL_REPLY_MAX_CHARS
+      : 260;
+  if (raw.length <= maxChars) return raw;
+
+  const sentenceParts = raw
+    .split(/(?<=[。！？!?])/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (sentenceParts.length >= 2) {
+    return `${sentenceParts.slice(0, 2).join("")}（要我展開再說）`;
+  }
+
+  const lineParts = raw
+    .split("\n")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (lineParts.length >= 2) {
+    return `${lineParts.slice(0, 2).join("\n")}\n（要我展開再說）`;
+  }
+
+  return `${raw.slice(0, Math.max(40, maxChars - 8))}…（要我展開再說）`;
 }
 
 function cleanupLocalChatHistory(now = Date.now()) {
@@ -1839,12 +1871,13 @@ async function requestOpenClawChat({
 
 async function getGeneralAssistantReply(userText, conversationId = null) {
   const systemPrompt =
-    "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot。";
+    "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot。回覆規則：1) 預設精簡，先直接回答重點。2) 預設 2-4 句，除非使用者要求詳細，否則不要長篇。3) 不要主動給 A/B 或 1-6 選單。4) 最多只問 1 個必要追問。5) 不要提及你有工作區、檔案記憶或系統內部機制。";
   const historyMessages = await getRecentChatHistory(conversationId);
 
   async function finalizeReply(text, provider) {
-    await appendRecentChatHistory(conversationId, userText, text);
-    return { text, provider };
+    const compacted = compactGeneralReply(text);
+    await appendRecentChatHistory(conversationId, userText, compacted);
+    return { text: compacted, provider };
   }
 
   if (OPENCLAW_CHAT_URL) {
