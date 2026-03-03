@@ -101,6 +101,59 @@ async function redisSetNx(key, value, ttlSeconds) {
   }
 }
 
+async function redisZAdd(key, score, member) {
+  if (!(await ensureRedisReady())) return false;
+  try {
+    await redisClient.zadd(key, score, member);
+    return true;
+  } catch (err) {
+    markRedisUnavailable(err, `ZADD failed (${key})`);
+    return false;
+  }
+}
+
+async function redisZRangeByScore(key, min, max, limit = 20) {
+  if (!(await ensureRedisReady())) return [];
+  try {
+    const safeLimit =
+      Number.isFinite(limit) && limit > 0 ? Math.min(limit, 200) : 20;
+    const result = await redisClient.zrangebyscore(
+      key,
+      min,
+      max,
+      "LIMIT",
+      0,
+      safeLimit
+    );
+    return Array.isArray(result) ? result : [];
+  } catch (err) {
+    markRedisUnavailable(err, `ZRANGEBYSCORE failed (${key})`);
+    return [];
+  }
+}
+
+async function redisZRem(key, member) {
+  if (!(await ensureRedisReady())) return 0;
+  try {
+    const removed = await redisClient.zrem(key, member);
+    return Number.isFinite(removed) ? removed : 0;
+  } catch (err) {
+    markRedisUnavailable(err, `ZREM failed (${key})`);
+    return 0;
+  }
+}
+
+async function redisDel(key) {
+  if (!(await ensureRedisReady())) return 0;
+  try {
+    const deleted = await redisClient.del(key);
+    return Number.isFinite(deleted) ? deleted : 0;
+  } catch (err) {
+    markRedisUnavailable(err, `DEL failed (${key})`);
+    return 0;
+  }
+}
+
 const LINE_TEXT_LIMIT = 5000;
 const LINE_SKIP_REDELIVERY = !/^(0|false|no)$/i.test(
   process.env.LINE_SKIP_REDELIVERY || "true"
@@ -335,6 +388,22 @@ const CHAT_HISTORY_MAX_CHARS = Number(
 const GENERAL_REPLY_MAX_CHARS = Number(
   process.env.GENERAL_REPLY_MAX_CHARS || 260
 );
+const REMINDER_QUEUE_KEY = "reminder:due";
+const REMINDER_ITEM_PREFIX = "reminder:item:";
+const REMINDER_TTL_SECONDS = Number(
+  process.env.REMINDER_TTL_SECONDS || 60 * 60 * 24 * 7
+);
+const REMINDER_MAX_TEXT_CHARS = Number(
+  process.env.REMINDER_MAX_TEXT_CHARS || 80
+);
+const REMINDER_SCAN_BATCH = Number(process.env.REMINDER_SCAN_BATCH || 20);
+const REMINDER_MAX_RETRIES = Number(process.env.REMINDER_MAX_RETRIES || 3);
+const REMINDER_RETRY_DELAY_SECONDS = Number(
+  process.env.REMINDER_RETRY_DELAY_SECONDS || 60
+);
+const TAIPEI_UTC_OFFSET_MINUTES = Number(
+  process.env.TAIPEI_UTC_OFFSET_MINUTES || 8 * 60
+);
 const localChatHistory = new Map();
 
 function getWeatherContextKey(userId) {
@@ -506,6 +575,364 @@ async function appendRecentChatHistory(conversationId, userText, assistantText) 
   history.push({ role: "assistant", content: assistantContent });
 
   await setRecentChatHistory(conversationId, history);
+}
+
+function getReminderItemKey(reminderId) {
+  return `${REMINDER_ITEM_PREFIX}${reminderId}`;
+}
+
+function pad2(v) {
+  return String(v).padStart(2, "0");
+}
+
+function taipeiPartsFromUtcMs(ms) {
+  const offsetMs = TAIPEI_UTC_OFFSET_MINUTES * 60 * 1000;
+  const shifted = new Date(ms + offsetMs);
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate(),
+    hour: shifted.getUTCHours(),
+    minute: shifted.getUTCMinutes(),
+  };
+}
+
+function utcMsFromTaipeiParts(parts) {
+  const offsetMs = TAIPEI_UTC_OFFSET_MINUTES * 60 * 1000;
+  return (
+    Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute) -
+    offsetMs
+  );
+}
+
+function taipeiDateKey(ms) {
+  const p = taipeiPartsFromUtcMs(ms);
+  return `${p.year}-${pad2(p.month)}-${pad2(p.day)}`;
+}
+
+function reminderDateLabel(dueAtMs, nowMs = Date.now()) {
+  const due = taipeiPartsFromUtcMs(dueAtMs);
+  const dueTime = `${pad2(due.hour)}:${pad2(due.minute)}`;
+
+  const today = taipeiDateKey(nowMs);
+  const tomorrow = taipeiDateKey(nowMs + 24 * 60 * 60 * 1000);
+  const dayAfter = taipeiDateKey(nowMs + 2 * 24 * 60 * 60 * 1000);
+  const dueKey = taipeiDateKey(dueAtMs);
+
+  if (dueKey === today) return `今天 ${dueTime}`;
+  if (dueKey === tomorrow) return `明天 ${dueTime}`;
+  if (dueKey === dayAfter) return `後天 ${dueTime}`;
+  return `${due.month}/${due.day} ${dueTime}`;
+}
+
+function parseChineseNumberToken(token) {
+  const t = String(token || "")
+    .trim()
+    .replace(/兩/g, "二")
+    .replace(/〇/g, "零");
+  if (!t) return null;
+
+  const map = {
+    零: 0,
+    一: 1,
+    二: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  };
+
+  if (/^\d+$/.test(t)) return Number.parseInt(t, 10);
+
+  if (t.includes("十")) {
+    const parts = t.split("十");
+    const tensPart = parts[0];
+    const onesPart = parts[1];
+    const tens = tensPart ? map[tensPart] : 1;
+    const ones = onesPart ? map[onesPart] : 0;
+    if (!Number.isFinite(tens) || !Number.isFinite(ones)) return null;
+    return tens * 10 + ones;
+  }
+
+  if (t.length === 1 && Number.isFinite(map[t])) return map[t];
+  return null;
+}
+
+function parseNumberToken(token) {
+  const n = parseChineseNumberToken(token);
+  return Number.isFinite(n) ? n : null;
+}
+
+function cleanReminderText(text) {
+  const raw = String(text || "")
+    .replace(/[。！？!?,，\s]+$/g, "")
+    .trim();
+  if (!raw) return "";
+  const max =
+    Number.isFinite(REMINDER_MAX_TEXT_CHARS) && REMINDER_MAX_TEXT_CHARS > 0
+      ? REMINDER_MAX_TEXT_CHARS
+      : 80;
+  return raw.length > max ? `${raw.slice(0, max - 3)}...` : raw;
+}
+
+function parseReminderCommand(rawText, nowMs = Date.now()) {
+  const text = String(rawText || "").trim();
+  if (!text.includes("提醒")) return null;
+
+  const relMinute = text.match(
+    /([0-9零〇一二兩三四五六七八九十]{1,3})\s*(分鐘|分钟|分鍾)\s*後提醒(?:我)?(.+)/
+  );
+  if (relMinute) {
+    const n = parseNumberToken(relMinute[1]);
+    const content = cleanReminderText(relMinute[3]);
+    if (!Number.isFinite(n) || n <= 0 || !content) return null;
+    return {
+      dueAt: nowMs + n * 60 * 1000,
+      text: content,
+    };
+  }
+
+  const relHour = text.match(
+    /([0-9零〇一二兩三四五六七八九十]{1,2})\s*(小時|小时)\s*後提醒(?:我)?(.+)/
+  );
+  if (relHour) {
+    const n = parseNumberToken(relHour[1]);
+    const content = cleanReminderText(relHour[3]);
+    if (!Number.isFinite(n) || n <= 0 || !content) return null;
+    return {
+      dueAt: nowMs + n * 60 * 60 * 1000,
+      text: content,
+    };
+  }
+
+  const contentMatch = text.match(/提醒(?:我)?(.+)$/);
+  const reminderText = cleanReminderText(contentMatch?.[1] || "");
+  if (!reminderText) return null;
+
+  let hour = null;
+  let minute = 0;
+
+  const colonMatch = text.match(
+    /([0-9零〇一二兩三四五六七八九十]{1,3})\s*[:：]\s*([0-9零〇一二兩三四五六七八九十]{1,2})/
+  );
+  const halfMatch = text.match(/([0-9零〇一二兩三四五六七八九十]{1,3})\s*點半/);
+  const hourMatch = text.match(
+    /([0-9零〇一二兩三四五六七八九十]{1,3})\s*點(?:\s*([0-9零〇一二兩三四五六七八九十]{1,2})\s*分?)?/
+  );
+
+  if (colonMatch) {
+    hour = parseNumberToken(colonMatch[1]);
+    minute = parseNumberToken(colonMatch[2]);
+  } else if (halfMatch) {
+    hour = parseNumberToken(halfMatch[1]);
+    minute = 30;
+  } else if (hourMatch) {
+    hour = parseNumberToken(hourMatch[1]);
+    minute = hourMatch[2] ? parseNumberToken(hourMatch[2]) : 0;
+  } else {
+    return null;
+  }
+
+  if (
+    !Number.isFinite(hour) ||
+    !Number.isFinite(minute) ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return null;
+  }
+
+  const hasPmHint = /(下午|晚上|今晚|傍晚)/.test(text);
+  const hasAmHint = /(凌晨|清晨|早上|上午)/.test(text);
+  if (hasPmHint && hour < 12) hour += 12;
+  if (/凌晨/.test(text) && hour === 12) hour = 0;
+
+  let dayOffset = 0;
+  if (/後天/.test(text)) dayOffset = 2;
+  else if (/明天|明早|明晚/.test(text)) dayOffset = 1;
+
+  const nowParts = taipeiPartsFromUtcMs(nowMs);
+  const baseUtc = utcMsFromTaipeiParts({
+    year: nowParts.year,
+    month: nowParts.month,
+    day: nowParts.day,
+    hour: 0,
+    minute: 0,
+  });
+  const targetDayUtc = baseUtc + dayOffset * 24 * 60 * 60 * 1000;
+  const targetDayParts = taipeiPartsFromUtcMs(targetDayUtc);
+
+  let dueAt = utcMsFromTaipeiParts({
+    year: targetDayParts.year,
+    month: targetDayParts.month,
+    day: targetDayParts.day,
+    hour,
+    minute,
+  });
+
+  if (!hasPmHint && !hasAmHint && dayOffset === 0 && hour >= 1 && hour <= 11) {
+    const plus12 = dueAt + 12 * 60 * 60 * 1000;
+    if (dueAt <= nowMs && plus12 > nowMs) dueAt = plus12;
+  }
+
+  if (dueAt <= nowMs + 30 * 1000) {
+    dueAt += 24 * 60 * 60 * 1000;
+  }
+
+  return {
+    dueAt,
+    text: reminderText,
+  };
+}
+
+function buildReminderTarget(event) {
+  const type = event?.source?.type;
+  if (type === "user" && event?.source?.userId) {
+    return { targetType: "user", targetId: event.source.userId };
+  }
+  if (type === "group" && event?.source?.groupId) {
+    return { targetType: "group", targetId: event.source.groupId };
+  }
+  if (type === "room" && event?.source?.roomId) {
+    return { targetType: "room", targetId: event.source.roomId };
+  }
+  return null;
+}
+
+async function scheduleReminder(event, parsedReminder) {
+  const target = buildReminderTarget(event);
+  if (!target || !parsedReminder?.text || !Number.isFinite(parsedReminder?.dueAt)) {
+    return null;
+  }
+
+  const reminderId = `r_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+  const payload = {
+    id: reminderId,
+    dueAt: parsedReminder.dueAt,
+    text: parsedReminder.text,
+    targetType: target.targetType,
+    targetId: target.targetId,
+    conversationId: getConversationId(event),
+    creatorId: event?.source?.userId || null,
+    retries: 0,
+    createdAt: Date.now(),
+  };
+
+  const itemKey = getReminderItemKey(reminderId);
+  const saved = await redisSet(
+    itemKey,
+    JSON.stringify(payload),
+    "EX",
+    Number.isFinite(REMINDER_TTL_SECONDS) && REMINDER_TTL_SECONDS > 0
+      ? REMINDER_TTL_SECONDS
+      : 60 * 60 * 24 * 7
+  );
+  if (!saved) return null;
+
+  const queued = await redisZAdd(REMINDER_QUEUE_KEY, payload.dueAt, reminderId);
+  if (!queued) {
+    await redisDel(itemKey);
+    return null;
+  }
+
+  return payload;
+}
+
+async function processDueReminders() {
+  const now = Date.now();
+  const dueIds = await redisZRangeByScore(
+    REMINDER_QUEUE_KEY,
+    0,
+    now,
+    REMINDER_SCAN_BATCH
+  );
+  if (!dueIds.length) {
+    return { scanned: 0, sent: 0, retried: 0, failed: 0 };
+  }
+
+  let sent = 0;
+  let retried = 0;
+  let failed = 0;
+
+  for (const reminderId of dueIds) {
+    const claimed = await redisZRem(REMINDER_QUEUE_KEY, reminderId);
+    if (!claimed) continue;
+
+    const itemKey = getReminderItemKey(reminderId);
+    const raw = await redisGet(itemKey);
+    if (!raw) continue;
+
+    let payload;
+    try {
+      payload = JSON.parse(raw);
+    } catch (err) {
+      console.error("reminder payload parse error:", err);
+      await redisDel(itemKey);
+      failed++;
+      continue;
+    }
+
+    const text = cleanReminderText(payload?.text || "");
+    const targetId = payload?.targetId;
+    if (!text || !targetId) {
+      await redisDel(itemKey);
+      failed++;
+      continue;
+    }
+
+    try {
+      await client.pushMessage(targetId, normalizeLineMessage({
+        type: "text",
+        text: `⏰ 提醒：${text}`,
+      }));
+      await redisDel(itemKey);
+      sent++;
+    } catch (err) {
+      const retries = Number(payload?.retries || 0) + 1;
+      if (retries <= REMINDER_MAX_RETRIES) {
+        const retryDueAt =
+          Date.now() +
+          (Number.isFinite(REMINDER_RETRY_DELAY_SECONDS) &&
+          REMINDER_RETRY_DELAY_SECONDS > 0
+            ? REMINDER_RETRY_DELAY_SECONDS
+            : 60) *
+            1000;
+        const retryPayload = {
+          ...payload,
+          retries,
+          dueAt: retryDueAt,
+        };
+        await redisSet(
+          itemKey,
+          JSON.stringify(retryPayload),
+          "EX",
+          Number.isFinite(REMINDER_TTL_SECONDS) && REMINDER_TTL_SECONDS > 0
+            ? REMINDER_TTL_SECONDS
+            : 60 * 60 * 24 * 7
+        );
+        await redisZAdd(REMINDER_QUEUE_KEY, retryDueAt, reminderId);
+        retried++;
+      } else {
+        await redisDel(itemKey);
+        failed++;
+      }
+      console.error("reminder push failed:", err?.message || err);
+    }
+  }
+
+  return {
+    scanned: dueIds.length,
+    sent,
+    retried,
+    failed,
+  };
 }
 
 function isGroupAllowed(event) {
@@ -1871,7 +2298,7 @@ async function requestOpenClawChat({
 
 async function getGeneralAssistantReply(userText, conversationId = null) {
   const systemPrompt =
-    "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot。回覆規則：1) 預設精簡，先直接回答重點。2) 預設 2-4 句，除非使用者要求詳細，否則不要長篇。3) 不要主動給 A/B 或 1-6 選單。4) 最多只問 1 個必要追問。5) 不要提及你有工作區、檔案記憶或系統內部機制。";
+    "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot。回覆規則：1) 預設精簡，先直接回答重點。2) 預設 2-4 句，除非使用者要求詳細，否則不要長篇。3) 不要主動給 A/B 或 1-6 選單。4) 最多只問 1 個必要追問。5) 不要提及你有工作區、檔案記憶或系統內部機制。6) 不能假設自己有上網查詢能力；若缺即時資料，直接明講限制並給可行替代方案。";
   const historyMessages = await getRecentChatHistory(conversationId);
 
   async function finalizeReply(text, provider) {
@@ -2019,6 +2446,35 @@ app.post("/api/generate-bible-cards", async (req, res) => {
   });
 });
 
+app.get("/api/run-reminders", async (req, res) => {
+  if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  let scanned = 0;
+  let sent = 0;
+  let retried = 0;
+  let failed = 0;
+
+  for (let i = 0; i < 5; i++) {
+    const stats = await processDueReminders();
+    scanned += stats.scanned;
+    sent += stats.sent;
+    retried += stats.retried;
+    failed += stats.failed;
+
+    if (stats.scanned < REMINDER_SCAN_BATCH) break;
+  }
+
+  return res.json({
+    ok: true,
+    scanned,
+    sent,
+    retried,
+    failed,
+  });
+});
+
 app.post("/webhook", line.middleware(config), async (req, res) => {
   const events = req.body.events || [];
 
@@ -2077,6 +2533,32 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       const parsedMessage = stripBotName(rawMessage); // 邏輯用 / GPT 用
       const userId = event.source.userId;
       const conversationId = getConversationId(event);
+
+      const parsedReminder = parseReminderCommand(parsedMessage || userMessage);
+      if (parsedReminder) {
+        const scheduled = await scheduleReminder(event, parsedReminder);
+        if (!scheduled) {
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: "提醒建立失敗（可能是暫時連不上資料庫），請晚點再試一次。",
+          });
+          continue;
+        }
+
+        const targetLabel =
+          event.source.type === "user"
+            ? "你"
+            : event.source.type === "group"
+            ? "本群"
+            : "這個聊天室";
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: `好，我會在 ${reminderDateLabel(
+            scheduled.dueAt
+          )} 提醒${targetLabel}：${scheduled.text}`,
+        });
+        continue;
+      }
 
       // ─────────────────────────────────────
       // 🎴 媽祖抽籤指令
