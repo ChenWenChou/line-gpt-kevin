@@ -272,6 +272,11 @@ const OPENCLAW_CHAT_URL = process.env.OPENCLAW_CHAT_URL;
 const OPENCLAW_API_KEY = process.env.OPENCLAW_API_KEY;
 const OPENCLAW_MODEL = process.env.OPENCLAW_MODEL || "openai/gpt-5-mini";
 const OPENCLAW_TIMEOUT_MS = Number(process.env.OPENCLAW_TIMEOUT_MS || 20000);
+const OPENCLAW_RETRY_MODEL =
+  process.env.OPENCLAW_RETRY_MODEL || "openai/gpt-4o-mini";
+const OPENCLAW_RETRY_TIMEOUT_MS = Number(
+  process.env.OPENCLAW_RETRY_TIMEOUT_MS || 12000
+);
 const OPENCLAW_REQUEST_CONTENT_TYPE =
   process.env.OPENCLAW_REQUEST_CONTENT_TYPE ||
   (OPENCLAW_CHAT_URL?.includes(".up.railway.app")
@@ -1597,78 +1602,127 @@ function extractAssistantText(payload) {
   return null;
 }
 
+function isAbortLikeError(err) {
+  if (!err) return false;
+  if (err.name === "AbortError") return true;
+  const msg = String(err?.message || err || "").toLowerCase();
+  return msg.includes("aborted") || msg.includes("timeout");
+}
+
+async function requestOpenClawChat({ systemPrompt, userText, model, timeoutMs }) {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(),
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 20000
+  );
+
+  try {
+    const headers = {
+      "content-type": OPENCLAW_REQUEST_CONTENT_TYPE,
+      accept: "application/json",
+    };
+    if (OPENCLAW_API_KEY) {
+      headers.authorization = `Bearer ${OPENCLAW_API_KEY}`;
+    }
+
+    const payload = {
+      model,
+      stream: false,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userText },
+      ],
+    };
+
+    const r = await fetch(OPENCLAW_CHAT_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const raw = await r.text();
+
+    if (!r.ok) {
+      throw new Error(`OpenClaw HTTP ${r.status}: ${(raw || "").slice(0, 200)}`);
+    }
+
+    let json;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      throw new Error(`OpenClaw 回傳不是 JSON: ${(raw || "").slice(0, 200)}`);
+    }
+
+    const text = extractAssistantText(json);
+    if (text) return text;
+
+    throw new Error("OpenClaw 回傳找不到文字內容");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function getGeneralAssistantReply(userText) {
   const systemPrompt =
     "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot。";
 
   if (OPENCLAW_CHAT_URL) {
-    const controller = new AbortController();
-    const timer = setTimeout(
-      () => controller.abort(),
-      Number.isFinite(OPENCLAW_TIMEOUT_MS) ? OPENCLAW_TIMEOUT_MS : 8000
-    );
-
     try {
-      const headers = {
-        "content-type": OPENCLAW_REQUEST_CONTENT_TYPE,
-        accept: "application/json",
-      };
-      if (OPENCLAW_API_KEY) {
-        headers.authorization = `Bearer ${OPENCLAW_API_KEY}`;
-      }
-
-      const payload = {
+      const text = await requestOpenClawChat({
+        systemPrompt,
+        userText,
         model: OPENCLAW_MODEL,
-        stream: false,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userText },
-        ],
-      };
-
-      const r = await fetch(OPENCLAW_CHAT_URL, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller.signal,
+        timeoutMs: OPENCLAW_TIMEOUT_MS,
       });
-      const raw = await r.text();
-
-      if (!r.ok) {
-        throw new Error(
-          `OpenClaw HTTP ${r.status}: ${(raw || "").slice(0, 200)}`
-        );
-      }
-
-      let json;
-      try {
-        json = JSON.parse(raw);
-      } catch {
-        throw new Error(`OpenClaw 回傳不是 JSON: ${(raw || "").slice(0, 200)}`);
-      }
-
-      const text = extractAssistantText(json);
-      if (text) return { text, provider: "openclaw" };
-
-      throw new Error("OpenClaw 回傳找不到文字內容");
-    } catch (err) {
-      const reason = err?.message || String(err);
+      return { text, provider: "openclaw" };
+    } catch (primaryErr) {
+      let lastErr = primaryErr;
+      const primaryReason = primaryErr?.message || String(primaryErr);
       console.error("OpenClaw failed:", {
-        reason,
+        reason: primaryReason,
         url: OPENCLAW_CHAT_URL,
         model: OPENCLAW_MODEL,
         timeoutMs: OPENCLAW_TIMEOUT_MS,
         contentType: OPENCLAW_REQUEST_CONTENT_TYPE,
       });
+
+      const canRetryWithFastModel =
+        isAbortLikeError(primaryErr) &&
+        OPENCLAW_RETRY_MODEL &&
+        OPENCLAW_RETRY_MODEL !== OPENCLAW_MODEL;
+
+      if (canRetryWithFastModel) {
+        try {
+          const text = await requestOpenClawChat({
+            systemPrompt,
+            userText,
+            model: OPENCLAW_RETRY_MODEL,
+            timeoutMs: OPENCLAW_RETRY_TIMEOUT_MS,
+          });
+          console.warn("OpenClaw retry model success:", {
+            model: OPENCLAW_RETRY_MODEL,
+            timeoutMs: OPENCLAW_RETRY_TIMEOUT_MS,
+          });
+          return { text, provider: "openclaw_retry" };
+        } catch (retryErr) {
+          lastErr = retryErr;
+          console.error("OpenClaw retry failed:", {
+            reason: retryErr?.message || String(retryErr),
+            model: OPENCLAW_RETRY_MODEL,
+            timeoutMs: OPENCLAW_RETRY_TIMEOUT_MS,
+          });
+        }
+      }
+
       if (OPENCLAW_FORCE_ONLY) {
         return {
-          text: `OpenClaw 暫時不可用（${reason.slice(0, 80)}），請稍後再試。`,
+          text: `OpenClaw 暫時不可用（${String(
+            lastErr?.message || lastErr || "unknown"
+          ).slice(0, 80)}），請稍後再試。`,
           provider: "openclaw_error",
         };
       }
       console.error("fallback to OpenAI");
-    } finally {
-      clearTimeout(timer);
     }
   } else if (OPENCLAW_FORCE_ONLY) {
     return {
