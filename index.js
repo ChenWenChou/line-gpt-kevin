@@ -325,6 +325,14 @@ const TW_CITY_MAP = {
 const WEATHER_CONTEXT_TTL_SECONDS = Number(
   process.env.WEATHER_CONTEXT_TTL_SECONDS || 60 * 60 * 24
 );
+const CHAT_HISTORY_ROUNDS = Number(process.env.CHAT_HISTORY_ROUNDS || 6);
+const CHAT_HISTORY_TTL_SECONDS = Number(
+  process.env.CHAT_HISTORY_TTL_SECONDS || 45 * 60
+);
+const CHAT_HISTORY_MAX_CHARS = Number(
+  process.env.CHAT_HISTORY_MAX_CHARS || 500
+);
+const localChatHistory = new Map();
 
 function getWeatherContextKey(userId) {
   if (!userId) return null;
@@ -362,6 +370,110 @@ async function setLastWeatherContext(userId, payload) {
   } catch (err) {
     console.error("setLastWeatherContext error:", err);
   }
+}
+
+function getConversationId(event) {
+  return (
+    event?.source?.userId || event?.source?.groupId || event?.source?.roomId || null
+  );
+}
+
+function getChatHistoryKey(conversationId) {
+  if (!conversationId) return null;
+  return `chat:history:${conversationId}`;
+}
+
+function sanitizeChatContent(text) {
+  const t = String(text || "").trim();
+  if (!t) return "";
+  const max =
+    Number.isFinite(CHAT_HISTORY_MAX_CHARS) && CHAT_HISTORY_MAX_CHARS > 0
+      ? CHAT_HISTORY_MAX_CHARS
+      : 500;
+  return t.length > max ? `${t.slice(0, max - 3)}...` : t;
+}
+
+function getChatHistoryMaxMessages() {
+  const rounds =
+    Number.isFinite(CHAT_HISTORY_ROUNDS) && CHAT_HISTORY_ROUNDS > 0
+      ? CHAT_HISTORY_ROUNDS
+      : 6;
+  return Math.max(2, rounds * 2);
+}
+
+function normalizeChatHistory(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((m) => ({
+      role: m?.role === "assistant" ? "assistant" : "user",
+      content: sanitizeChatContent(m?.content),
+    }))
+    .filter((m) => m.content);
+}
+
+function trimChatHistory(raw) {
+  const messages = normalizeChatHistory(raw);
+  const maxMessages = getChatHistoryMaxMessages();
+  if (messages.length <= maxMessages) return messages;
+  return messages.slice(messages.length - maxMessages);
+}
+
+function cleanupLocalChatHistory(now = Date.now()) {
+  for (const [key, value] of localChatHistory.entries()) {
+    if (!value || value.expiresAt <= now) localChatHistory.delete(key);
+  }
+}
+
+async function getRecentChatHistory(conversationId) {
+  const key = getChatHistoryKey(conversationId);
+  if (!key) return [];
+
+  try {
+    const raw = await redisGet(key);
+    if (raw) {
+      const parsed = trimChatHistory(JSON.parse(raw));
+      if (parsed.length) return parsed;
+    }
+  } catch (err) {
+    console.error("getRecentChatHistory parse error:", err);
+  }
+
+  cleanupLocalChatHistory();
+  const local = localChatHistory.get(key);
+  if (!local) return [];
+  return trimChatHistory(local.messages);
+}
+
+async function setRecentChatHistory(conversationId, messages) {
+  const key = getChatHistoryKey(conversationId);
+  if (!key) return;
+
+  const sanitized = trimChatHistory(messages);
+  const ttl =
+    Number.isFinite(CHAT_HISTORY_TTL_SECONDS) && CHAT_HISTORY_TTL_SECONDS > 0
+      ? CHAT_HISTORY_TTL_SECONDS
+      : 45 * 60;
+
+  localChatHistory.set(key, {
+    messages: sanitized,
+    expiresAt: Date.now() + ttl * 1000,
+  });
+
+  await redisSet(key, JSON.stringify(sanitized), "EX", ttl);
+}
+
+async function appendRecentChatHistory(conversationId, userText, assistantText) {
+  if (!conversationId) return;
+
+  const userContent = sanitizeChatContent(userText);
+  const assistantContent = sanitizeChatContent(assistantText);
+  if (!userContent || !assistantContent) return;
+
+  const history = await getRecentChatHistory(conversationId);
+  history.push({ role: "user", content: userContent });
+  history.push({ role: "assistant", content: assistantContent });
+
+  await setRecentChatHistory(conversationId, history);
 }
 
 function isGroupAllowed(event) {
@@ -1665,7 +1777,13 @@ function selectOpenClawRoute(userText) {
   };
 }
 
-async function requestOpenClawChat({ systemPrompt, userText, model, timeoutMs }) {
+async function requestOpenClawChat({
+  systemPrompt,
+  userText,
+  model,
+  timeoutMs,
+  historyMessages = [],
+}) {
   const controller = new AbortController();
   const timer = setTimeout(
     () => controller.abort(),
@@ -1686,6 +1804,7 @@ async function requestOpenClawChat({ systemPrompt, userText, model, timeoutMs })
       stream: false,
       messages: [
         { role: "system", content: systemPrompt },
+        ...normalizeChatHistory(historyMessages),
         { role: "user", content: userText },
       ],
     };
@@ -1718,9 +1837,15 @@ async function requestOpenClawChat({ systemPrompt, userText, model, timeoutMs })
   }
 }
 
-async function getGeneralAssistantReply(userText) {
+async function getGeneralAssistantReply(userText, conversationId = null) {
   const systemPrompt =
     "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot。";
+  const historyMessages = await getRecentChatHistory(conversationId);
+
+  async function finalizeReply(text, provider) {
+    await appendRecentChatHistory(conversationId, userText, text);
+    return { text, provider };
+  }
 
   if (OPENCLAW_CHAT_URL) {
     const route = selectOpenClawRoute(userText);
@@ -1731,8 +1856,9 @@ async function getGeneralAssistantReply(userText) {
         userText,
         model: route.model,
         timeoutMs: route.timeoutMs,
+        historyMessages,
       });
-      return { text, provider: "openclaw" };
+      return finalizeReply(text, "openclaw");
     } catch (primaryErr) {
       let lastErr = primaryErr;
       const primaryReason = primaryErr?.message || String(primaryErr);
@@ -1761,12 +1887,13 @@ async function getGeneralAssistantReply(userText) {
             userText,
             model: resolvedRetryModel,
             timeoutMs: OPENCLAW_RETRY_TIMEOUT_MS,
+            historyMessages,
           });
           console.warn("OpenClaw retry model success:", {
             model: resolvedRetryModel,
             timeoutMs: OPENCLAW_RETRY_TIMEOUT_MS,
           });
-          return { text, provider: "openclaw_retry" };
+          return finalizeReply(text, "openclaw_retry");
         } catch (retryErr) {
           lastErr = retryErr;
           console.error("OpenClaw retry failed:", {
@@ -1798,14 +1925,14 @@ async function getGeneralAssistantReply(userText) {
     model: "gpt-4o-mini",
     messages: [
       { role: "system", content: systemPrompt },
+      ...normalizeChatHistory(historyMessages),
       { role: "user", content: userText },
     ],
   });
 
-  return {
-    text: reply.choices?.[0]?.message?.content?.trim() || "我剛剛斷線了，再說一次",
-    provider: "openai",
-  };
+  const text =
+    reply.choices?.[0]?.message?.content?.trim() || "我剛剛斷線了，再說一次";
+  return finalizeReply(text, "openai");
 }
 
 app.post("/api/generate-bible-cards", async (req, res) => {
@@ -1916,6 +2043,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       const userMessage = rawMessage; // 判斷用（gate）
       const parsedMessage = stripBotName(rawMessage); // 邏輯用 / GPT 用
       const userId = event.source.userId;
+      const conversationId = getConversationId(event);
 
       // ─────────────────────────────────────
       // 🎴 媽祖抽籤指令
@@ -2183,7 +2311,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       // ─────────────────────────────────────
       // 5️⃣ 一般聊天（優先 OpenClaw，失敗 fallback OpenAI）
       // ─────────────────────────────────────
-      const reply = await getGeneralAssistantReply(parsedMessage);
+      const reply = await getGeneralAssistantReply(parsedMessage, conversationId);
       console.log("chat provider:", reply.provider);
 
       await replyMessageWithFallback(event, {
