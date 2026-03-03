@@ -270,10 +270,23 @@ const openai = new OpenAI({
 
 const OPENCLAW_CHAT_URL = process.env.OPENCLAW_CHAT_URL;
 const OPENCLAW_API_KEY = process.env.OPENCLAW_API_KEY;
-const OPENCLAW_MODEL = process.env.OPENCLAW_MODEL || "openai/gpt-5-mini";
+const OPENCLAW_MODEL_SIMPLE =
+  process.env.OPENCLAW_MODEL_SIMPLE || "openai/gpt-4o-mini";
+const OPENCLAW_MODEL_COMPLEX =
+  process.env.OPENCLAW_MODEL_COMPLEX ||
+  process.env.OPENCLAW_MODEL ||
+  "openai/gpt-5-mini";
+const OPENCLAW_ROUTE_ENABLED = !/^(0|false|no)$/i.test(
+  process.env.OPENCLAW_ROUTE_ENABLED || "true"
+);
+const OPENCLAW_COMPLEX_TEXT_LENGTH = Number(
+  process.env.OPENCLAW_COMPLEX_TEXT_LENGTH || 120
+);
+const OPENCLAW_TIMEOUT_MS_SIMPLE = Number(
+  process.env.OPENCLAW_TIMEOUT_MS_SIMPLE || 12000
+);
 const OPENCLAW_TIMEOUT_MS = Number(process.env.OPENCLAW_TIMEOUT_MS || 20000);
-const OPENCLAW_RETRY_MODEL =
-  process.env.OPENCLAW_RETRY_MODEL || "openai/gpt-4o-mini";
+const OPENCLAW_RETRY_MODEL = process.env.OPENCLAW_RETRY_MODEL || "";
 const OPENCLAW_RETRY_TIMEOUT_MS = Number(
   process.env.OPENCLAW_RETRY_TIMEOUT_MS || 12000
 );
@@ -1609,6 +1622,49 @@ function isAbortLikeError(err) {
   return msg.includes("aborted") || msg.includes("timeout");
 }
 
+function isComplexChatRequest(userText) {
+  const t = String(userText || "").trim();
+  if (!t) return false;
+
+  if (
+    Number.isFinite(OPENCLAW_COMPLEX_TEXT_LENGTH) &&
+    OPENCLAW_COMPLEX_TEXT_LENGTH > 0 &&
+    t.length >= OPENCLAW_COMPLEX_TEXT_LENGTH
+  ) {
+    return true;
+  }
+
+  if (t.split(/\n+/).length >= 3) return true;
+
+  return /(分析|比較|規劃|策略|架構|程式|debug|錯誤|為什麼|詳細|步驟|總結|報告|翻譯|法律|醫療|投資|優化)/i.test(
+    t
+  );
+}
+
+function selectOpenClawRoute(userText) {
+  if (!OPENCLAW_ROUTE_ENABLED) {
+    return {
+      reason: "route_disabled",
+      model: OPENCLAW_MODEL_COMPLEX,
+      timeoutMs: OPENCLAW_TIMEOUT_MS,
+    };
+  }
+
+  if (isComplexChatRequest(userText)) {
+    return {
+      reason: "complex",
+      model: OPENCLAW_MODEL_COMPLEX,
+      timeoutMs: OPENCLAW_TIMEOUT_MS,
+    };
+  }
+
+  return {
+    reason: "simple",
+    model: OPENCLAW_MODEL_SIMPLE,
+    timeoutMs: OPENCLAW_TIMEOUT_MS_SIMPLE,
+  };
+}
+
 async function requestOpenClawChat({ systemPrompt, userText, model, timeoutMs }) {
   const controller = new AbortController();
   const timer = setTimeout(
@@ -1667,12 +1723,14 @@ async function getGeneralAssistantReply(userText) {
     "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot。";
 
   if (OPENCLAW_CHAT_URL) {
+    const route = selectOpenClawRoute(userText);
     try {
+      console.log("openclaw route:", route.reason, route.model);
       const text = await requestOpenClawChat({
         systemPrompt,
         userText,
-        model: OPENCLAW_MODEL,
-        timeoutMs: OPENCLAW_TIMEOUT_MS,
+        model: route.model,
+        timeoutMs: route.timeoutMs,
       });
       return { text, provider: "openclaw" };
     } catch (primaryErr) {
@@ -1681,26 +1739,31 @@ async function getGeneralAssistantReply(userText) {
       console.error("OpenClaw failed:", {
         reason: primaryReason,
         url: OPENCLAW_CHAT_URL,
-        model: OPENCLAW_MODEL,
-        timeoutMs: OPENCLAW_TIMEOUT_MS,
+        model: route.model,
+        timeoutMs: route.timeoutMs,
         contentType: OPENCLAW_REQUEST_CONTENT_TYPE,
       });
 
+      const resolvedRetryModel =
+        OPENCLAW_RETRY_MODEL ||
+        (route.model === OPENCLAW_MODEL_SIMPLE
+          ? OPENCLAW_MODEL_COMPLEX
+          : OPENCLAW_MODEL_SIMPLE);
       const canRetryWithFastModel =
         isAbortLikeError(primaryErr) &&
-        OPENCLAW_RETRY_MODEL &&
-        OPENCLAW_RETRY_MODEL !== OPENCLAW_MODEL;
+        resolvedRetryModel &&
+        resolvedRetryModel !== route.model;
 
       if (canRetryWithFastModel) {
         try {
           const text = await requestOpenClawChat({
             systemPrompt,
             userText,
-            model: OPENCLAW_RETRY_MODEL,
+            model: resolvedRetryModel,
             timeoutMs: OPENCLAW_RETRY_TIMEOUT_MS,
           });
           console.warn("OpenClaw retry model success:", {
-            model: OPENCLAW_RETRY_MODEL,
+            model: resolvedRetryModel,
             timeoutMs: OPENCLAW_RETRY_TIMEOUT_MS,
           });
           return { text, provider: "openclaw_retry" };
@@ -1708,7 +1771,7 @@ async function getGeneralAssistantReply(userText) {
           lastErr = retryErr;
           console.error("OpenClaw retry failed:", {
             reason: retryErr?.message || String(retryErr),
-            model: OPENCLAW_RETRY_MODEL,
+            model: resolvedRetryModel,
             timeoutMs: OPENCLAW_RETRY_TIMEOUT_MS,
           });
         }
