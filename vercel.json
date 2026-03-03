@@ -14,10 +14,6 @@
     {
       "path": "/api/update-stocks",
       "schedule": "0 6 * * *"
-    },
-    {
-      "path": "/api/run-reminders",
-      "schedule": "* * * * *"
     }
   ]
 }

@@ -2395,8 +2395,21 @@ async function getGeneralAssistantReply(userText, conversationId = null) {
   return finalizeReply(text, "openai");
 }
 
+function isCronAuthorized(req) {
+  const secret = String(process.env.CRON_SECRET || "").trim();
+  if (!secret) return false;
+
+  if (req.headers.authorization === `Bearer ${secret}`) return true;
+
+  const queryKey =
+    typeof req.query?.key === "string" ? req.query.key.trim() : "";
+  if (queryKey && queryKey === secret) return true;
+
+  return false;
+}
+
 app.post("/api/generate-bible-cards", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!isCronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
 
@@ -2447,7 +2460,7 @@ app.post("/api/generate-bible-cards", async (req, res) => {
 });
 
 app.get("/api/run-reminders", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!isCronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
 
@@ -2846,7 +2859,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 });
 
 app.get("/api/update-stocks", async (req, res) => {
-  if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!isCronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
 
