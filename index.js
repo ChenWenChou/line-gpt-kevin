@@ -1906,24 +1906,254 @@ async function estimateFoodCalorie(food) {
 
 // 股市 15分鐘延遲
 
+const STOCKS_REDIS_KEY = "twse:stocks:all";
+const TWSE_STOCKS_OPENAPI_URL =
+  "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL";
+const TWSE_STOCKS_CSV_URL =
+  "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data";
+const MIN_TWSE_STOCK_COUNT = 500;
+
+const COMMON_TW_ETF_ALIASES = {
+  "0050": {
+    name: "元大台灣50",
+    aliases: ["台灣50", "元大50", "元大台灣50"],
+  },
+  "0056": {
+    name: "元大高股息",
+    aliases: ["高股息", "元大高股息"],
+  },
+  "006208": {
+    name: "富邦台50",
+    aliases: ["富邦台灣50", "富邦台50"],
+  },
+  "00713": {
+    name: "元大台灣高息低波",
+    aliases: ["高息低波", "元大高息低波", "元大台灣高息低波"],
+  },
+  "00878": {
+    name: "國泰永續高股息",
+    aliases: ["國泰高股息", "永續高股息", "國泰永續高股息"],
+  },
+  "00881": {
+    name: "國泰台灣5G+",
+    aliases: ["國泰5G", "台灣5G", "國泰台灣5G"],
+  },
+  "00900": {
+    name: "富邦特選高股息30",
+    aliases: ["富邦高股息", "富邦特選高股息"],
+  },
+  "00919": {
+    name: "群益台灣精選高息",
+    aliases: ["群益高息", "群益台灣精選高息", "台灣精選高息"],
+  },
+  "00929": {
+    name: "復華台灣科技優息",
+    aliases: ["復華科技優息", "科技優息", "台灣科技優息"],
+  },
+  "00939": {
+    name: "統一台灣高息動能",
+    aliases: ["統一高息動能", "台灣高息動能"],
+  },
+  "00940": {
+    name: "元大台灣價值高息",
+    aliases: ["元大價值高息", "台灣價值高息"],
+  },
+};
+
+function normalizeStockText(value) {
+  return String(value || "")
+    .toUpperCase()
+    .replace(/[\s　]+/g, "")
+    .replace(/[()（）[\]【】「」『』,，.。．、:：;；_\-]/g, "");
+}
+
+function normalizeStockCode(value) {
+  const code = String(value || "").trim().toUpperCase();
+  if (!/^(?:\d{4,6}|\d{4,5}[A-Z])$/.test(code)) return "";
+  return code;
+}
+
+function extractStockCodeFromQuery(query) {
+  const upper = String(query || "").toUpperCase();
+  const match = upper.match(/(?:^|[^0-9A-Z])((?:\d{4,6}|\d{4,5}[A-Z]))(?=$|[^0-9A-Z])/);
+  return match ? match[1] : "";
+}
+
+function getCommonEtfAliases(code) {
+  return COMMON_TW_ETF_ALIASES[code]?.aliases || [];
+}
+
+function addStockRecord(stocks, { code, name, market = "TWSE", symbol }) {
+  const normalizedCode = normalizeStockCode(code);
+  const normalizedName = String(name || "").trim();
+  if (!normalizedCode || !normalizedName) return false;
+
+  stocks[normalizedCode] = {
+    code: normalizedCode,
+    name: normalizedName,
+    market,
+    symbol: symbol || `${normalizedCode}.${market === "TPEX" ? "TWO" : "TW"}`,
+    aliases: getCommonEtfAliases(normalizedCode),
+  };
+  return true;
+}
+
+function findCommonEtfByAlias(query, stocks = {}) {
+  const normalizedQuery = normalizeStockText(query);
+  const candidates = Object.entries(COMMON_TW_ETF_ALIASES)
+    .flatMap(([code, info]) =>
+      [info.name, ...(info.aliases || [])].map((alias) => ({
+        code,
+        name: info.name,
+        alias,
+        normalizedAlias: normalizeStockText(alias),
+      }))
+    )
+    .filter((item) => item.normalizedAlias)
+    .sort((a, b) => b.normalizedAlias.length - a.normalizedAlias.length);
+
+  const matched = candidates.find((item) =>
+    normalizedQuery.includes(item.normalizedAlias)
+  );
+  if (!matched) return null;
+
+  return (
+    stocks[matched.code] || {
+      code: matched.code,
+      name: matched.name,
+      market: "TWSE",
+      symbol: `${matched.code}.TW`,
+      aliases: getCommonEtfAliases(matched.code),
+    }
+  );
+}
+
+function parseCsvLine(line) {
+  const s = String(line || "").replace(/\r/g, "");
+  const out = [];
+  let cur = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (s[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      out.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+
+  out.push(cur);
+  return out.map((x) => x.replace(/^\uFEFF/, "").trim());
+}
+
+function parseTwseOpenApiStocks(items) {
+  const stocks = {};
+  if (!Array.isArray(items)) return stocks;
+
+  for (const item of items) {
+    addStockRecord(stocks, {
+      code: item?.["證券代號"] || item?.Code || item?.code,
+      name: item?.["證券名稱"] || item?.Name || item?.name,
+      market: "TWSE",
+    });
+  }
+
+  return stocks;
+}
+
+function parseTwseCsvStocks(text) {
+  const allLines = String(text || "")
+    .split(/\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const headerIndex = allLines.findIndex(
+    (l) => l.includes("證券代號") && l.includes("證券名稱")
+  );
+  if (headerIndex < 0) return { stocks: {}, headerIndex, header: [] };
+
+  const header = parseCsvLine(allLines[headerIndex]);
+  const codeIndex = header.findIndex((c) => c.includes("證券代號"));
+  const nameIndex = header.findIndex((c) => c.includes("證券名稱"));
+  const stocks = {};
+
+  if (codeIndex < 0 || nameIndex < 0) {
+    return { stocks, headerIndex, header };
+  }
+
+  for (let i = headerIndex + 1; i < allLines.length; i++) {
+    const cols = parseCsvLine(allLines[i]);
+    addStockRecord(stocks, {
+      code: cols[codeIndex],
+      name: cols[nameIndex],
+      market: "TWSE",
+    });
+  }
+
+  return { stocks, headerIndex, header };
+}
+
 async function findStock(query) {
   console.log("findStock query =", query);
-  const raw = await redisGet("twse:stocks:all");
-  if (!raw) return null;
+  const raw = await redisGet(STOCKS_REDIS_KEY);
+  let stocks = {};
 
-  const stocks = JSON.parse(raw);
+  if (raw) {
+    try {
+      stocks = JSON.parse(raw);
+    } catch (err) {
+      console.error("stock cache parse failed:", err);
+      stocks = {};
+    }
+  }
 
   const q = query.trim();
 
-  // ✅ 1️⃣ 從句子中抓 4~6 碼股票代號（最重要）
-  const codeMatch = q.match(/\b\d{4,6}\b/);
-  if (codeMatch) {
-    const code = codeMatch[0];
+  // 1. 從句子中抓台股/ETF 代號，支援 00980A 這類英數代號。
+  const code = extractStockCodeFromQuery(q);
+  if (code) {
     if (stocks[code]) return stocks[code];
+    if (COMMON_TW_ETF_ALIASES[code]) {
+      return {
+        code,
+        name: COMMON_TW_ETF_ALIASES[code].name,
+        market: "TWSE",
+        symbol: `${code}.TW`,
+        aliases: getCommonEtfAliases(code),
+      };
+    }
   }
 
-  // ✅ 2️⃣ 名稱模糊（台積電 / 鴻海）
-  return Object.values(stocks).find((s) => q.includes(s.name)) || null;
+  // 2. 常見 ETF 別名優先，讓「高股息」「台灣50」這類問法能命中。
+  const aliasMatched = findCommonEtfByAlias(q, stocks);
+  if (aliasMatched) return aliasMatched;
+
+  // 3. 名稱模糊（台積電 / 鴻海 / ETF 全名）。
+  const normalizedQuery = normalizeStockText(q);
+  return (
+    Object.values(stocks).find((s) => {
+      const names = [s.name, ...(Array.isArray(s.aliases) ? s.aliases : [])];
+      return names.some((name) =>
+        normalizedQuery.includes(normalizeStockText(name))
+      );
+    }) || null
+  );
 }
 
 async function getStockQuote(symbol) {
@@ -2657,13 +2887,17 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             typeof q.changePercent === "number"
               ? q.changePercent.toFixed(2)
               : "--";
+          const volumeLots =
+            typeof q.volume === "number"
+              ? Math.round(q.volume / 1000).toLocaleString()
+              : "--";
 
           const text = `📊 ${stock.name}（${stock.code}）
 
 現價：${fmtTWPrice(q.price)}
 漲跌：${sign}${fmtTWPrice(q.change)}（${sign}${percent}%）
 開盤：${fmtTWPrice(q.open)}
-成交量：${q.volume?.toLocaleString() ?? "--"} 張
+成交量：${volumeLots} 張
 
 ※ 資料來源：Yahoo Finance（延遲報價）`;
 
@@ -2863,113 +3097,121 @@ app.get("/api/update-stocks", async (req, res) => {
     return res.status(401).json({ error: "unauthorized" });
   }
 
-  const url =
-    "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data";
+  const debug = [];
+  let stocks = {};
+  let source = "";
 
-  const r = await fetch(url, {
-    headers: {
-      "user-agent": "Mozilla/5.0",
-      accept: "text/csv,application/json;q=0.9,*/*;q=0.8",
-    },
-  });
+  try {
+    const r = await fetch(TWSE_STOCKS_OPENAPI_URL, {
+      headers: {
+        "user-agent": "Mozilla/5.0",
+        accept: "application/json",
+      },
+    });
+    const contentType = r.headers.get("content-type") || "";
+    const text = await r.text();
+    const looksLikeHTML = /<html|<!doctype html|頁面無法執行/i.test(text);
 
-  const contentType = r.headers.get("content-type") || "";
-  const text = await r.text();
-
-  // ---- ✅ 診斷：前 3 行 + content-type + 前 120 字 ----
-  const head120 = text.slice(0, 120);
-  const linesRaw = text
-    .split(/\n/)
-    .slice(0, 5)
-    .map((l) => l.slice(0, 200));
-
-  // 如果根本不是 CSV（常見：HTML 被擋、或回 JSON）
-  const looksLikeHTML = /<html|<!doctype html/i.test(text);
-  const looksLikeJSON = /^\s*[\[{]/.test(text);
-
-  // ---- ✅ 真正 CSV parser：支援引號/逗號/空欄位 ----
-  function parseCsvLine(line) {
-    const s = line.replace(/\r/g, ""); // 重要：去掉 \r
-    const out = [];
-    let cur = "";
-    let inQuotes = false;
-
-    for (let i = 0; i < s.length; i++) {
-      const ch = s[i];
-
-      if (inQuotes) {
-        if (ch === '"') {
-          // "" 代表 escaped quote
-          if (s[i + 1] === '"') {
-            cur += '"';
-            i++;
-          } else {
-            inQuotes = false;
-          }
-        } else {
-          cur += ch;
-        }
-      } else {
-        if (ch === '"') inQuotes = true;
-        else if (ch === ",") {
-          out.push(cur);
-          cur = "";
-        } else {
-          cur += ch;
-        }
-      }
-    }
-    out.push(cur);
-    return out.map((x) => x.replace(/^\uFEFF/, "").trim()); // 去 BOM + trim
-  }
-
-  // ---- ✅ 解析 ----
-  const allLines = text
-    .split(/\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  // 找 header 行（避免前面是空白或 BOM）
-  const headerIndex = allLines.findIndex(
-    (l) => l.includes("證券代號") && l.includes("證券名稱")
-  );
-  const startIndex = headerIndex >= 0 ? headerIndex + 1 : 1; // 找不到就假設第 1 行是 header
-
-  const stocks = {};
-  const samples = [];
-
-  for (let i = startIndex; i < allLines.length; i++) {
-    const line = allLines[i];
-    if (!line) continue;
-
-    const cols = parseCsvLine(line);
-
-    const code = cols[1]?.trim(); // ✅ 證券代號
-    const name = cols[2]?.trim(); // ✅ 證券名稱
-
-    if (!/^\d{4,6}$/.test(code)) continue;
-
-    stocks[code] = {
-      code,
-      name,
-      symbol: `${code}.TW`,
-    };
-  }
-
-  await redisSet("twse:stocks:all", JSON.stringify(stocks));
-
-  return res.json({
-    ok: true,
-    count: Object.keys(stocks).length,
-    debug: {
+    debug.push({
+      source: "twse-openapi",
       status: r.status,
       contentType,
       looksLikeHTML,
-      looksLikeJSON,
-      head120,
-      first5Lines: linesRaw,
-      headerIndex,
-      sampleParsed: samples,
+      head120: text.slice(0, 120),
+    });
+
+    if (!r.ok || looksLikeHTML) {
+      throw new Error(`TWSE OpenAPI unavailable: ${r.status}`);
+    }
+
+    stocks = parseTwseOpenApiStocks(JSON.parse(text));
+    source = "twse-openapi";
+  } catch (err) {
+    console.warn("TWSE OpenAPI stock update failed:", err?.message || err);
+    debug.push({
+      source: "twse-openapi",
+      error: String(err?.message || err),
+    });
+  }
+
+  if (Object.keys(stocks).length < MIN_TWSE_STOCK_COUNT) {
+    try {
+      const r = await fetch(TWSE_STOCKS_CSV_URL, {
+        headers: {
+          "user-agent": "Mozilla/5.0",
+          accept: "text/csv,*/*;q=0.8",
+        },
+      });
+      const contentType = r.headers.get("content-type") || "";
+      const text = await r.text();
+      const looksLikeHTML = /<html|<!doctype html|頁面無法執行/i.test(text);
+      const linesRaw = text
+        .split(/\n/)
+        .slice(0, 5)
+        .map((l) => l.slice(0, 200));
+      const parsed = looksLikeHTML
+        ? { stocks: {}, headerIndex: -1, header: [] }
+        : parseTwseCsvStocks(text);
+
+      debug.push({
+        source: "twse-csv",
+        status: r.status,
+        contentType,
+        looksLikeHTML,
+        head120: text.slice(0, 120),
+        first5Lines: linesRaw,
+        headerIndex: parsed.headerIndex,
+        header: parsed.header,
+        count: Object.keys(parsed.stocks).length,
+      });
+
+      if (!r.ok || looksLikeHTML) {
+        throw new Error(`TWSE CSV unavailable: ${r.status}`);
+      }
+
+      stocks = parsed.stocks;
+      source = "twse-csv";
+    } catch (err) {
+      console.warn("TWSE CSV stock update failed:", err?.message || err);
+      debug.push({
+        source: "twse-csv",
+        error: String(err?.message || err),
+      });
+    }
+  }
+
+  const count = Object.keys(stocks).length;
+  const sampleParsed = Object.values(stocks).slice(0, 5);
+
+  if (count < MIN_TWSE_STOCK_COUNT) {
+    return res.status(502).json({
+      ok: false,
+      error: "stock source parsed too few records; keep existing Redis cache",
+      count,
+      minCount: MIN_TWSE_STOCK_COUNT,
+      debug,
+    });
+  }
+
+  const saved = await redisSet(STOCKS_REDIS_KEY, JSON.stringify(stocks));
+  if (!saved) {
+    return res.status(503).json({
+      ok: false,
+      error: "Redis unavailable; stock cache not updated",
+      count,
+      source,
+      sampleParsed,
+      debug,
+    });
+  }
+
+  return res.json({
+    ok: true,
+    source,
+    count,
+    debug: {
+      sampleParsed,
+      sources: debug,
     },
   });
 });
