@@ -1,7 +1,6 @@
 import express from "express";
 import line from "@line/bot-sdk";
 import OpenAI from "openai";
-import sharp from "sharp";
 // 求籤
 import fs from "fs";
 import path from "path";
@@ -2654,6 +2653,12 @@ async function getCollectedIntradayHistory(stock) {
   };
 }
 
+async function renderSvgToPng(svg) {
+  const sharpModule = await import("sharp");
+  const sharpInstance = sharpModule.default || sharpModule;
+  return sharpInstance(Buffer.from(svg)).png().toBuffer();
+}
+
 function getPublicBaseUrl() {
   const raw =
     process.env.PUBLIC_BASE_URL ||
@@ -4410,7 +4415,7 @@ app.get("/api/stock-kline.png", async (req, res) => {
       symbol: history.symbol,
       points: history.points,
     });
-    const png = await sharp(Buffer.from(svg)).png().toBuffer();
+    const png = await renderSvgToPng(svg);
 
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Cache-Control", "no-store");
