@@ -2328,9 +2328,23 @@ function getStockChartMenuMessage(stock) {
   };
 }
 
-function formatStockChartLabel(timestampSeconds, chartType) {
+function formatStockChartLabel(timestampSeconds, chartType, range = "") {
   const date = new Date(timestampSeconds * 1000);
   if (chartType === "intraday") {
+    if (range === "5d") {
+      const monthDay = date.toLocaleDateString("zh-TW", {
+        timeZone: "Asia/Taipei",
+        month: "2-digit",
+        day: "2-digit",
+      });
+      const time = date.toLocaleTimeString("zh-TW", {
+        timeZone: "Asia/Taipei",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+      return `${monthDay} ${time}`;
+    }
     return date.toLocaleTimeString("zh-TW", {
       timeZone: "Asia/Taipei",
       hour: "2-digit",
@@ -2359,6 +2373,21 @@ function movingAverage(values, period) {
     if (valid.length < period) return null;
     return Number((valid.reduce((sum, v) => sum + v, 0) / period).toFixed(2));
   });
+}
+
+function getStockChartTitleLabel(stock, history) {
+  const marketLabel = getStockMarketLabelBySymbol(history.symbol, stock);
+  const displayChartType = history.displayChartType || history.chartType;
+
+  if (displayChartType === "intraday") {
+    return `${stock.name} (${stock.code} | ${marketLabel}) 當日分時`;
+  }
+
+  if (displayChartType === "intraday5d") {
+    return `${stock.name} (${stock.code} | ${marketLabel}) 近 5 日分時`;
+  }
+
+  return `${stock.name} (${stock.code} | ${marketLabel}) 日 K 走勢`;
 }
 
 async function getStockHistory(symbol, { range, interval, chartType }) {
@@ -2397,7 +2426,7 @@ async function getStockHistory(symbol, { range, interval, chartType }) {
 
   const points = timestamps
     .map((ts, index) => ({
-      label: formatStockChartLabel(ts, chartType),
+      label: formatStockChartLabel(ts, chartType, range),
       close: closes[index],
       volume: volumes[index],
     }))
@@ -2411,15 +2440,30 @@ async function getStockHistoryWithFallback(stock, chartType) {
   const requests =
     chartType === "intraday"
       ? [
-          { range: "1d", interval: "5m", chartType, fallbackLabel: "" },
+          {
+            range: "1d",
+            interval: "5m",
+            chartType,
+            displayChartType: "intraday",
+            fallbackLabel: "",
+          },
           {
             range: "5d",
             interval: "15m",
             chartType,
+            displayChartType: "intraday5d",
             fallbackLabel: "近 5 日分時",
           },
         ]
-      : [{ range: "3mo", interval: "1d", chartType, fallbackLabel: "" }];
+      : [
+          {
+            range: "3mo",
+            interval: "1d",
+            chartType,
+            displayChartType: "daily",
+            fallbackLabel: "",
+          },
+        ];
 
   for (const request of requests) {
     for (const symbol of getStockCandidateSymbols(stock)) {
@@ -2429,6 +2473,7 @@ async function getStockHistoryWithFallback(stock, chartType) {
           points,
           symbol,
           chartType,
+          displayChartType: request.displayChartType,
           fallbackLabel: request.fallbackLabel,
         };
       }
@@ -2448,7 +2493,7 @@ async function getStockHistoryWithFallback(stock, chartType) {
   return null;
 }
 
-function buildStockChartConfig({ stock, symbol, points, chartType }) {
+function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel }) {
   const labels = points.map((p) => p.label);
   const prices = points.map((p) => Number(p.close.toFixed(2)));
   const volumes = points.map((p) =>
@@ -2460,9 +2505,7 @@ function buildStockChartConfig({ stock, symbol, points, chartType }) {
   });
   const marketLabel = getStockMarketLabelBySymbol(symbol, stock);
   const title =
-    chartType === "intraday"
-      ? `${stock.name} (${stock.code} | ${marketLabel}) 當日分時`
-      : `${stock.name} (${stock.code} | ${marketLabel}) 日 K 走勢`;
+    titleLabel || `${stock.name} (${stock.code} | ${marketLabel}) 日 K 走勢`;
   const datasets = [
     {
       type: "line",
@@ -2533,7 +2576,7 @@ function buildStockChartConfig({ stock, symbol, points, chartType }) {
           {
             ticks: {
               autoSkip: true,
-              maxTicksLimit: chartType === "intraday" ? 8 : 7,
+              maxTicksLimit: chartType === "intraday" ? 6 : 7,
               maxRotation: 0,
             },
             gridLines: { color: "rgba(0,0,0,0.05)" },
@@ -2621,6 +2664,7 @@ async function replyStockChart(event, stock, chartType) {
     symbol: history.symbol,
     points: history.points,
     chartType: history.chartType || chartType,
+    titleLabel: getStockChartTitleLabel(stock, history),
   });
   const chartUrl = await createQuickChartUrl(chartConfig);
   if (!chartUrl) {
@@ -2633,13 +2677,20 @@ async function replyStockChart(event, stock, chartType) {
 
   const marketLabel = getStockMarketLabelBySymbol(history.symbol, stock);
   const resolvedChartType = history.chartType || chartType;
+  const displayChartType = history.displayChartType || resolvedChartType;
   const typeLabel =
     history.fallbackLabel ||
     (resolvedChartType === "intraday" ? "當日分時圖" : "日 K 線圖");
+  const noteText =
+    displayChartType === "daily"
+      ? "\n※ 日 K 資料通常於收盤後更新，盤中可能停在上一交易日。"
+      : displayChartType === "intraday5d"
+        ? "\n※ Yahoo 未提供完整當日分時時，會改用近 5 日分時資料。"
+        : "";
   await replyMessageWithFallback(event, [
     {
       type: "text",
-      text: `📈 ${stock.name}（${stock.code}｜${marketLabel}）${typeLabel}`,
+      text: `📈 ${stock.name}（${stock.code}｜${marketLabel}）${typeLabel}${noteText}`,
     },
     {
       type: "image",
