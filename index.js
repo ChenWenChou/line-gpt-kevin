@@ -1,6 +1,7 @@
 import express from "express";
 import line from "@line/bot-sdk";
 import OpenAI from "openai";
+import sharp from "sharp";
 // 求籤
 import fs from "fs";
 import path from "path";
@@ -2967,6 +2968,14 @@ function getStockKLineSvgUrl(stock) {
   return `${getPublicBaseUrl()}/api/stock-kline.svg?${params.toString()}`;
 }
 
+function getStockKLinePngUrl(stock) {
+  const params = new URLSearchParams({
+    code: stock.code,
+    t: String(Date.now()),
+  });
+  return `${getPublicBaseUrl()}/api/stock-kline.png?${params.toString()}`;
+}
+
 async function getStockHistory(symbol, { range, interval, chartType }) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
   const controller = new AbortController();
@@ -3334,7 +3343,7 @@ async function createQuickChartUrl(chartConfig) {
 async function replyStockChart(event, stock, chartType) {
   if (chartType === "daily") {
     const marketLabel = getStockMarketLabelBySymbol(stock.symbol, stock);
-    const chartUrl = getStockKLineSvgUrl(stock);
+    const chartUrl = getStockKLinePngUrl(stock);
 
     await replyMessageWithFallback(event, [
       {
@@ -3362,7 +3371,7 @@ async function replyStockChart(event, stock, chartType) {
 
   if ((history.chartType || chartType) === "daily") {
     const marketLabel = getStockMarketLabelBySymbol(history.symbol, stock);
-    const chartUrl = getStockKLineSvgUrl(stock);
+    const chartUrl = getStockKLinePngUrl(stock);
     await replyMessageWithFallback(event, [
       {
         type: "text",
@@ -4374,6 +4383,40 @@ app.get("/api/stock-kline.svg", async (req, res) => {
     res.status(200).send(svg);
   } catch (err) {
     console.error("stock kline svg failed:", err?.message || err);
+    res.status(500).type("text/plain").send("stock chart failed");
+  }
+});
+
+app.get("/api/stock-kline.png", async (req, res) => {
+  const code = normalizeStockCode(String(req.query.code || ""));
+
+  if (!code || !/^[0-9A-Z]{4,6}$/.test(code)) {
+    return res.status(400).type("text/plain").send("invalid stock code");
+  }
+
+  try {
+    const stock = await findStock(`${code} 股價`);
+    if (!stock) {
+      return res.status(404).type("text/plain").send("stock not found");
+    }
+
+    const history = await getStockHistoryWithFallback(stock, "daily");
+    if (!history?.points?.length) {
+      return res.status(502).type("text/plain").send("stock history unavailable");
+    }
+
+    const svg = buildStockKLineSvg({
+      stock,
+      symbol: history.symbol,
+      points: history.points,
+    });
+    const png = await sharp(Buffer.from(svg)).png().toBuffer();
+
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).send(png);
+  } catch (err) {
+    console.error("stock kline png failed:", err?.message || err);
     res.status(500).type("text/plain").send("stock chart failed");
   }
 });
