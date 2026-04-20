@@ -2444,6 +2444,17 @@ async function getStockHistory(symbol, { range, interval, chartType }) {
     .filter((p) => typeof p.close === "number");
 
   if (points.length < 2) return null;
+  if (chartType === "daily") {
+    const allCloses = points.map((p) => p.close);
+    const ma5 = movingAverage(allCloses, 5);
+    const ma20 = movingAverage(allCloses, 20);
+    const ma60 = movingAverage(allCloses, 60);
+    points.forEach((point, index) => {
+      point.ma5 = ma5[index];
+      point.ma20 = ma20[index];
+      point.ma60 = ma60[index];
+    });
+  }
   return chartType === "daily"
     ? takeLastPoints(points, 75)
     : downsamplePoints(points, 75);
@@ -2565,14 +2576,11 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
         ];
 
   if (chartType === "daily") {
-    const ma5 = movingAverage(prices, 5);
-    const ma20 = movingAverage(prices, 20);
-    const ma60 = movingAverage(prices, 60);
     datasets.push(
       {
         type: "line",
         label: "5MA",
-        data: labels.map((label, index) => dataPoint(label, ma5[index])),
+        data: labels.map((label, index) => dataPoint(label, points[index].ma5)),
         yAxisID: "price",
         borderColor: "#4f8cff",
         borderWidth: 1.6,
@@ -2583,7 +2591,7 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
       {
         type: "line",
         label: "20MA",
-        data: labels.map((label, index) => dataPoint(label, ma20[index])),
+        data: labels.map((label, index) => dataPoint(label, points[index].ma20)),
         yAxisID: "price",
         borderColor: "#f0a202",
         borderWidth: 1.6,
@@ -2594,7 +2602,7 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
       {
         type: "line",
         label: "60MA",
-        data: labels.map((label, index) => dataPoint(label, ma60[index])),
+        data: labels.map((label, index) => dataPoint(label, points[index].ma60)),
         yAxisID: "price",
         borderColor: "#d8a600",
         borderWidth: 1.4,
@@ -2608,17 +2616,19 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
   datasets.push({
     type: "bar",
     label: "成交量(張)",
-    data: volumes,
+    data: labels.map((label, index) => dataPoint(label, volumes[index])),
+    xAxisID: "x",
     yAxisID: "volume",
     backgroundColor: volumeColors,
     borderWidth: 0,
     barPercentage: chartType === "daily" ? 0.42 : 0.55,
     categoryPercentage: chartType === "daily" ? 0.72 : 0.75,
-    order: 9,
+    maxBarThickness: chartType === "daily" ? 7 : 10,
+    order: 20,
   });
 
   return {
-    type: chartType === "daily" ? "candlestick" : "line",
+    type: chartType === "daily" ? "bar" : "line",
     data: { labels, datasets },
     options: {
       responsive: true,
@@ -2683,7 +2693,7 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
           type: "linear",
           position: "right",
           beginAtZero: true,
-          suggestedMax: chartType === "daily" ? maxVolume * 3.2 : maxVolume * 2.4,
+          max: chartType === "daily" ? maxVolume * 4 : maxVolume * 2.4,
           ticks: {
             display: false,
           },
