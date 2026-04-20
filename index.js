@@ -2365,6 +2365,11 @@ function downsamplePoints(points, maxPoints) {
   return points.filter((_, i) => i % step === 0 || i === points.length - 1);
 }
 
+function takeLastPoints(points, maxPoints) {
+  if (points.length <= maxPoints) return points;
+  return points.slice(-maxPoints);
+}
+
 function movingAverage(values, period) {
   return values.map((_, index) => {
     if (index + 1 < period) return null;
@@ -2439,7 +2444,9 @@ async function getStockHistory(symbol, { range, interval, chartType }) {
     .filter((p) => typeof p.close === "number");
 
   if (points.length < 2) return null;
-  return downsamplePoints(points, chartType === "intraday" ? 75 : 65);
+  return chartType === "daily"
+    ? takeLastPoints(points, 75)
+    : downsamplePoints(points, 75);
 }
 
 async function getStockHistoryWithFallback(stock, chartType) {
@@ -2463,7 +2470,7 @@ async function getStockHistoryWithFallback(stock, chartType) {
         ]
       : [
           {
-            range: "3mo",
+            range: "6mo",
             interval: "1d",
             chartType,
             displayChartType: "daily",
@@ -2519,8 +2526,8 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
   });
   const volumeColors = pointColors.map((color) => {
     return color === "#e04352"
-      ? "rgba(224, 67, 82, 0.16)"
-      : "rgba(12, 170, 90, 0.16)";
+      ? "rgba(224, 67, 82, 0.22)"
+      : "rgba(12, 170, 90, 0.22)";
   });
   const marketLabel = getStockMarketLabelBySymbol(symbol, stock);
   const title =
@@ -2605,8 +2612,8 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
     yAxisID: "volume",
     backgroundColor: volumeColors,
     borderWidth: 0,
-    barPercentage: chartType === "daily" ? 0.28 : 0.55,
-    categoryPercentage: chartType === "daily" ? 0.55 : 0.75,
+    barPercentage: chartType === "daily" ? 0.42 : 0.55,
+    categoryPercentage: chartType === "daily" ? 0.72 : 0.75,
     order: 9,
   });
 
@@ -2676,7 +2683,7 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
           type: "linear",
           position: "right",
           beginAtZero: true,
-          max: chartType === "daily" ? maxVolume * 4 : maxVolume * 2.6,
+          suggestedMax: chartType === "daily" ? maxVolume * 3.2 : maxVolume * 2.4,
           ticks: {
             display: false,
           },
