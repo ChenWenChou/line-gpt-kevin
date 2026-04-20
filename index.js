@@ -1911,7 +1911,11 @@ const TWSE_STOCKS_OPENAPI_URL =
   "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL";
 const TWSE_STOCKS_CSV_URL =
   "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data";
+const TPEX_STOCKS_JSON_URL =
+  "https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date=&type=EW&response=json";
 const MIN_TWSE_STOCK_COUNT = 500;
+const MIN_TPEX_STOCK_COUNT = 300;
+const STOCK_QUOTE_TIMEOUT_MS = Number(process.env.STOCK_QUOTE_TIMEOUT_MS || 6000);
 
 const COMMON_TW_ETF_ALIASES = {
   "0050": {
@@ -1996,6 +2000,15 @@ function addStockRecord(stocks, { code, name, market = "TWSE", symbol }) {
     aliases: getCommonEtfAliases(normalizedCode),
   };
   return true;
+}
+
+function getStockCandidateSymbols(stock) {
+  const code = normalizeStockCode(stock?.code);
+  const symbols = [stock?.symbol].filter(Boolean);
+  if (code) {
+    symbols.push(`${code}.TW`, `${code}.TWO`);
+  }
+  return [...new Set(symbols)];
 }
 
 function findCommonEtfByAlias(query, stocks = {}) {
@@ -2109,6 +2122,31 @@ function parseTwseCsvStocks(text) {
   return { stocks, headerIndex, header };
 }
 
+function parseTpexJsonStocks(json) {
+  const stocks = {};
+  const tables = Array.isArray(json?.tables) ? json.tables : [];
+
+  for (const table of tables) {
+    const fields = Array.isArray(table?.fields) ? table.fields : [];
+    const data = Array.isArray(table?.data) ? table.data : [];
+    const codeIndex = fields.findIndex((f) => String(f).includes("代號"));
+    const nameIndex = fields.findIndex((f) => String(f).includes("名稱"));
+
+    if (codeIndex < 0 || nameIndex < 0) continue;
+
+    for (const row of data) {
+      if (!Array.isArray(row)) continue;
+      addStockRecord(stocks, {
+        code: row[codeIndex],
+        name: row[nameIndex],
+        market: "TPEX",
+      });
+    }
+  }
+
+  return stocks;
+}
+
 async function findStock(query) {
   console.log("findStock query =", query);
   const raw = await redisGet(STOCKS_REDIS_KEY);
@@ -2138,6 +2176,13 @@ async function findStock(query) {
         aliases: getCommonEtfAliases(code),
       };
     }
+    return {
+      code,
+      name: code,
+      market: "UNKNOWN",
+      symbol: `${code}.TW`,
+      aliases: [],
+    };
   }
 
   // 2. 常見 ETF 別名優先，讓「高股息」「台灣50」這類問法能命中。
@@ -2158,13 +2203,24 @@ async function findStock(query) {
 
 async function getStockQuote(symbol) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=2d`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), STOCK_QUOTE_TIMEOUT_MS);
 
-  const res = await fetch(url, {
-    headers: {
-      "user-agent": "Mozilla/5.0",
-      accept: "application/json",
-    },
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "user-agent": "Mozilla/5.0",
+        accept: "application/json",
+      },
+    });
+  } catch (err) {
+    console.error("Yahoo chart fetch failed", symbol, err?.message || err);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!res.ok) {
     const t = await res.text();
@@ -2208,6 +2264,14 @@ async function getStockQuote(symbol) {
     changePercent,
     volume: meta.regularMarketVolume,
   };
+}
+
+async function getStockQuoteWithFallback(stock) {
+  for (const symbol of getStockCandidateSymbols(stock)) {
+    const quote = await getStockQuote(symbol);
+    if (quote) return { quote, symbol };
+  }
+  return null;
 }
 
 
@@ -2879,8 +2943,9 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         }
 
         try {
-          const q = await getStockQuote(stock.symbol);
-          if (!q) throw new Error("no data");
+          const result = await getStockQuoteWithFallback(stock);
+          if (!result) throw new Error("no data");
+          const q = result.quote;
 
           const sign = q.change >= 0 ? "+" : "";
           const percent =
@@ -2891,8 +2956,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             typeof q.volume === "number"
               ? Math.round(q.volume / 1000).toLocaleString()
               : "--";
+          const marketLabel =
+            result.symbol.endsWith(".TWO") ? "上櫃" : "上市";
 
-          const text = `📊 ${stock.name}（${stock.code}）
+          const text = `📊 ${stock.name}（${stock.code}｜${marketLabel}）
 
 現價：${fmtTWPrice(q.price)}
 漲跌：${sign}${fmtTWPrice(q.change)}（${sign}${percent}%）
@@ -3100,6 +3167,8 @@ app.get("/api/update-stocks", async (req, res) => {
   const debug = [];
   let stocks = {};
   let source = "";
+  let twseCount = 0;
+  let tpexCount = 0;
 
   try {
     const r = await fetch(TWSE_STOCKS_OPENAPI_URL, {
@@ -3125,6 +3194,7 @@ app.get("/api/update-stocks", async (req, res) => {
     }
 
     stocks = parseTwseOpenApiStocks(JSON.parse(text));
+    twseCount = Object.keys(stocks).length;
     source = "twse-openapi";
   } catch (err) {
     console.warn("TWSE OpenAPI stock update failed:", err?.message || err);
@@ -3170,6 +3240,7 @@ app.get("/api/update-stocks", async (req, res) => {
       }
 
       stocks = parsed.stocks;
+      twseCount = Object.keys(stocks).length;
       source = "twse-csv";
     } catch (err) {
       console.warn("TWSE CSV stock update failed:", err?.message || err);
@@ -3180,14 +3251,56 @@ app.get("/api/update-stocks", async (req, res) => {
     }
   }
 
+  try {
+    const r = await fetch(TPEX_STOCKS_JSON_URL, {
+      headers: {
+        "user-agent": "Mozilla/5.0",
+        accept: "application/json",
+      },
+    });
+    const contentType = r.headers.get("content-type") || "";
+    const text = await r.text();
+    const looksLikeHTML = /<html|<!doctype html|頁面無法執行/i.test(text);
+
+    if (!r.ok || looksLikeHTML) {
+      throw new Error(`TPEX JSON unavailable: ${r.status}`);
+    }
+
+    const tpexStocks = parseTpexJsonStocks(JSON.parse(text));
+    tpexCount = Object.keys(tpexStocks).length;
+    if (tpexCount < MIN_TPEX_STOCK_COUNT) {
+      throw new Error(`TPEX parsed too few records: ${tpexCount}`);
+    }
+
+    debug.push({
+      source: "tpex-json",
+      status: r.status,
+      contentType,
+      looksLikeHTML,
+      count: tpexCount,
+      head120: text.slice(0, 120),
+    });
+
+    Object.assign(stocks, tpexStocks);
+    source = source ? `${source}+tpex-json` : "tpex-json";
+  } catch (err) {
+    console.warn("TPEX JSON stock update failed:", err?.message || err);
+    debug.push({
+      source: "tpex-json",
+      error: String(err?.message || err),
+    });
+  }
+
   const count = Object.keys(stocks).length;
   const sampleParsed = Object.values(stocks).slice(0, 5);
 
-  if (count < MIN_TWSE_STOCK_COUNT) {
+  if (twseCount < MIN_TWSE_STOCK_COUNT) {
     return res.status(502).json({
       ok: false,
-      error: "stock source parsed too few records; keep existing Redis cache",
+      error: "TWSE source parsed too few records; keep existing Redis cache",
       count,
+      twseCount,
+      tpexCount,
       minCount: MIN_TWSE_STOCK_COUNT,
       debug,
     });
@@ -3209,6 +3322,8 @@ app.get("/api/update-stocks", async (req, res) => {
     ok: true,
     source,
     count,
+    twseCount,
+    tpexCount,
     debug: {
       sampleParsed,
       sources: debug,
