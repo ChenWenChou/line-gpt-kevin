@@ -2653,12 +2653,6 @@ async function getCollectedIntradayHistory(stock) {
   };
 }
 
-async function renderSvgToPng(svg) {
-  const sharpModule = await import("sharp");
-  const sharpInstance = sharpModule.default || sharpModule;
-  return sharpInstance(Buffer.from(svg)).png().toBuffer();
-}
-
 function getPublicBaseUrl() {
   const raw =
     process.env.PUBLIC_BASE_URL ||
@@ -2971,14 +2965,6 @@ function getStockKLineSvgUrl(stock) {
     t: String(Date.now()),
   });
   return `${getPublicBaseUrl()}/api/stock-kline.svg?${params.toString()}`;
-}
-
-function getStockKLinePngUrl(stock) {
-  const params = new URLSearchParams({
-    code: stock.code,
-    t: String(Date.now()),
-  });
-  return `${getPublicBaseUrl()}/api/stock-kline.png?${params.toString()}`;
 }
 
 async function getStockHistory(symbol, { range, interval, chartType }) {
@@ -3346,24 +3332,6 @@ async function createQuickChartUrl(chartConfig) {
 }
 
 async function replyStockChart(event, stock, chartType) {
-  if (chartType === "daily") {
-    const marketLabel = getStockMarketLabelBySymbol(stock.symbol, stock);
-    const chartUrl = getStockKLinePngUrl(stock);
-
-    await replyMessageWithFallback(event, [
-      {
-        type: "text",
-        text: `📈 ${stock.name}（${stock.code}｜${marketLabel}）日 K 線圖\n※ 日 K 資料通常於收盤後更新，盤中可能停在上一交易日。`,
-      },
-      {
-        type: "image",
-        originalContentUrl: chartUrl,
-        previewImageUrl: chartUrl,
-      },
-    ]);
-    return;
-  }
-
   await rememberIntradayWatchStock(stock);
   const history = await getStockHistoryWithFallback(stock, chartType);
   if (!history) {
@@ -3371,25 +3339,6 @@ async function replyStockChart(event, stock, chartType) {
       type: "text",
       text: "線圖資料暫時取得失敗，請稍後再試。",
     });
-    return;
-  }
-
-  if ((history.chartType || chartType) === "daily") {
-    const marketLabel = getStockMarketLabelBySymbol(history.symbol, stock);
-    const chartUrl = getStockKLinePngUrl(stock);
-    await replyMessageWithFallback(event, [
-      {
-        type: "text",
-        text: `📈 ${stock.name}（${stock.code}｜${marketLabel}）${
-          history.fallbackLabel || "日 K 線圖"
-        }\n※ 日 K 資料通常於收盤後更新，盤中可能停在上一交易日。`,
-      },
-      {
-        type: "image",
-        originalContentUrl: chartUrl,
-        previewImageUrl: chartUrl,
-      },
-    ]);
     return;
   }
 
@@ -4388,40 +4337,6 @@ app.get("/api/stock-kline.svg", async (req, res) => {
     res.status(200).send(svg);
   } catch (err) {
     console.error("stock kline svg failed:", err?.message || err);
-    res.status(500).type("text/plain").send("stock chart failed");
-  }
-});
-
-app.get("/api/stock-kline.png", async (req, res) => {
-  const code = normalizeStockCode(String(req.query.code || ""));
-
-  if (!code || !/^[0-9A-Z]{4,6}$/.test(code)) {
-    return res.status(400).type("text/plain").send("invalid stock code");
-  }
-
-  try {
-    const stock = await findStock(`${code} 股價`);
-    if (!stock) {
-      return res.status(404).type("text/plain").send("stock not found");
-    }
-
-    const history = await getStockHistoryWithFallback(stock, "daily");
-    if (!history?.points?.length) {
-      return res.status(502).type("text/plain").send("stock history unavailable");
-    }
-
-    const svg = buildStockKLineSvg({
-      stock,
-      symbol: history.symbol,
-      points: history.points,
-    });
-    const png = await renderSvgToPng(svg);
-
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader("Cache-Control", "no-store");
-    res.status(200).send(png);
-  } catch (err) {
-    console.error("stock kline png failed:", err?.message || err);
     res.status(500).type("text/plain").send("stock chart failed");
   }
 });
