@@ -2408,15 +2408,43 @@ async function getStockHistory(symbol, { range, interval, chartType }) {
 }
 
 async function getStockHistoryWithFallback(stock, chartType) {
-  const request =
+  const requests =
     chartType === "intraday"
-      ? { range: "1d", interval: "5m", chartType }
-      : { range: "3mo", interval: "1d", chartType };
+      ? [
+          { range: "1d", interval: "5m", chartType, fallbackLabel: "" },
+          {
+            range: "5d",
+            interval: "15m",
+            chartType,
+            fallbackLabel: "近 5 日分時",
+          },
+        ]
+      : [{ range: "3mo", interval: "1d", chartType, fallbackLabel: "" }];
 
-  for (const symbol of getStockCandidateSymbols(stock)) {
-    const points = await getStockHistory(symbol, request);
-    if (points) return { points, symbol };
+  for (const request of requests) {
+    for (const symbol of getStockCandidateSymbols(stock)) {
+      const points = await getStockHistory(symbol, request);
+      if (points) {
+        return {
+          points,
+          symbol,
+          chartType,
+          fallbackLabel: request.fallbackLabel,
+        };
+      }
+    }
   }
+
+  if (chartType === "intraday") {
+    const daily = await getStockHistoryWithFallback(stock, "daily");
+    if (daily) {
+      return {
+        ...daily,
+        fallbackLabel: "分時資料暫時不足，改提供日 K 線圖",
+      };
+    }
+  }
+
   return null;
 }
 
@@ -2592,7 +2620,7 @@ async function replyStockChart(event, stock, chartType) {
     stock,
     symbol: history.symbol,
     points: history.points,
-    chartType,
+    chartType: history.chartType || chartType,
   });
   const chartUrl = await createQuickChartUrl(chartConfig);
   if (!chartUrl) {
@@ -2604,7 +2632,10 @@ async function replyStockChart(event, stock, chartType) {
   }
 
   const marketLabel = getStockMarketLabelBySymbol(history.symbol, stock);
-  const typeLabel = chartType === "intraday" ? "當日分時圖" : "日 K 線圖";
+  const resolvedChartType = history.chartType || chartType;
+  const typeLabel =
+    history.fallbackLabel ||
+    (resolvedChartType === "intraday" ? "當日分時圖" : "日 K 線圖");
   await replyMessageWithFallback(event, [
     {
       type: "text",
