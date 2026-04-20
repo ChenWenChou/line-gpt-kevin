@@ -2512,14 +2512,15 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
   const volumes = points.map((p) =>
     typeof p.volume === "number" ? Math.round(p.volume / 1000) : 0
   );
+  const maxVolume = Math.max(...volumes, 1);
   const pointColors = points.map((point, index) => {
     const open = typeof point.open === "number" ? point.open : prices[index - 1] ?? point.close;
     return point.close >= open ? "#e04352" : "#0caa5a";
   });
   const volumeColors = pointColors.map((color) => {
     return color === "#e04352"
-      ? "rgba(224, 67, 82, 0.28)"
-      : "rgba(12, 170, 90, 0.28)";
+      ? "rgba(224, 67, 82, 0.16)"
+      : "rgba(12, 170, 90, 0.16)";
   });
   const marketLabel = getStockMarketLabelBySymbol(symbol, stock);
   const title =
@@ -2600,12 +2601,13 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
   datasets.push({
     type: "bar",
     label: "成交量(張)",
-    data: labels.map((label, index) => dataPoint(label, volumes[index])),
+    data: volumes,
     yAxisID: "volume",
     backgroundColor: volumeColors,
     borderWidth: 0,
-    barPercentage: 0.75,
-    categoryPercentage: 0.9,
+    barPercentage: chartType === "daily" ? 0.28 : 0.55,
+    categoryPercentage: chartType === "daily" ? 0.55 : 0.75,
+    order: 9,
   });
 
   return {
@@ -2674,10 +2676,9 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
           type: "linear",
           position: "right",
           beginAtZero: true,
+          max: chartType === "daily" ? maxVolume * 4 : maxVolume * 2.6,
           ticks: {
-            color: "#777777",
-            maxTicksLimit: 4,
-            padding: 8,
+            display: false,
           },
           grid: { display: false },
           border: { display: false },
