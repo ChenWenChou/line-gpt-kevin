@@ -1916,6 +1916,11 @@ const TPEX_STOCKS_JSON_URL =
 const MIN_TWSE_STOCK_COUNT = 500;
 const MIN_TPEX_STOCK_COUNT = 300;
 const STOCK_QUOTE_TIMEOUT_MS = Number(process.env.STOCK_QUOTE_TIMEOUT_MS || 6000);
+const STOCK_HISTORY_TIMEOUT_MS = Number(
+  process.env.STOCK_HISTORY_TIMEOUT_MS || 8000
+);
+const QUICKCHART_CREATE_URL = "https://quickchart.io/chart/create";
+const QUICKCHART_TIMEOUT_MS = Number(process.env.QUICKCHART_TIMEOUT_MS || 8000);
 
 const COMMON_TW_ETF_ALIASES = {
   "0050": {
@@ -2284,6 +2289,333 @@ async function getStockQuoteWithFallback(stock) {
     if (quote) return { quote, symbol };
   }
   return null;
+}
+
+function getStockMarketLabelBySymbol(symbol, stock) {
+  if (symbol?.endsWith(".TWO") || stock?.market === "TPEX") return "上櫃";
+  if (symbol?.endsWith(".TW") || stock?.market === "TWSE") return "上市";
+  return "台股";
+}
+
+function getStockChartMenuMessage(stock) {
+  const marketLabel = getStockMarketLabelBySymbol(stock?.symbol, stock);
+  const code = stock.code;
+  const name = stock.name || code;
+
+  return {
+    type: "text",
+    text: `請選擇 ${name}（${code}｜${marketLabel}）的線圖類型`,
+    quickReply: {
+      items: [
+        {
+          type: "action",
+          action: {
+            type: "message",
+            label: "當日分時圖",
+            text: `助理 ${code} 分時`,
+          },
+        },
+        {
+          type: "action",
+          action: {
+            type: "message",
+            label: "日 K 線圖",
+            text: `助理 ${code} K線`,
+          },
+        },
+      ],
+    },
+  };
+}
+
+function formatStockChartLabel(timestampSeconds, chartType) {
+  const date = new Date(timestampSeconds * 1000);
+  if (chartType === "intraday") {
+    return date.toLocaleTimeString("zh-TW", {
+      timeZone: "Asia/Taipei",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  }
+  return date.toLocaleDateString("zh-TW", {
+    timeZone: "Asia/Taipei",
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
+function downsamplePoints(points, maxPoints) {
+  if (points.length <= maxPoints) return points;
+  const step = Math.ceil(points.length / maxPoints);
+  return points.filter((_, i) => i % step === 0 || i === points.length - 1);
+}
+
+function movingAverage(values, period) {
+  return values.map((_, index) => {
+    if (index + 1 < period) return null;
+    const slice = values.slice(index + 1 - period, index + 1);
+    const valid = slice.filter((v) => typeof v === "number");
+    if (valid.length < period) return null;
+    return Number((valid.reduce((sum, v) => sum + v, 0) / period).toFixed(2));
+  });
+}
+
+async function getStockHistory(symbol, { range, interval, chartType }) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), STOCK_HISTORY_TIMEOUT_MS);
+
+  let res;
+  try {
+    res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "user-agent": "Mozilla/5.0",
+        accept: "application/json",
+      },
+    });
+  } catch (err) {
+    console.error("Yahoo history fetch failed", symbol, err?.message || err);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!res.ok) {
+    const t = await res.text();
+    console.error("Yahoo history status", symbol, res.status, t.slice(0, 100));
+    return null;
+  }
+
+  const json = await res.json();
+  const result = json.chart?.result?.[0];
+  const timestamps = result?.timestamp || [];
+  const quote = result?.indicators?.quote?.[0] || {};
+  const closes = quote.close || [];
+  const volumes = quote.volume || [];
+
+  const points = timestamps
+    .map((ts, index) => ({
+      label: formatStockChartLabel(ts, chartType),
+      close: closes[index],
+      volume: volumes[index],
+    }))
+    .filter((p) => typeof p.close === "number");
+
+  if (points.length < 2) return null;
+  return downsamplePoints(points, chartType === "intraday" ? 75 : 65);
+}
+
+async function getStockHistoryWithFallback(stock, chartType) {
+  const request =
+    chartType === "intraday"
+      ? { range: "1d", interval: "5m", chartType }
+      : { range: "3mo", interval: "1d", chartType };
+
+  for (const symbol of getStockCandidateSymbols(stock)) {
+    const points = await getStockHistory(symbol, request);
+    if (points) return { points, symbol };
+  }
+  return null;
+}
+
+function buildStockChartConfig({ stock, symbol, points, chartType }) {
+  const labels = points.map((p) => p.label);
+  const prices = points.map((p) => Number(p.close.toFixed(2)));
+  const volumes = points.map((p) =>
+    typeof p.volume === "number" ? Math.round(p.volume / 1000) : 0
+  );
+  const volumeColors = prices.map((price, index) => {
+    const prev = index > 0 ? prices[index - 1] : price;
+    return price >= prev ? "rgba(224, 67, 82, 0.35)" : "rgba(12, 170, 90, 0.35)";
+  });
+  const marketLabel = getStockMarketLabelBySymbol(symbol, stock);
+  const title =
+    chartType === "intraday"
+      ? `${stock.name} (${stock.code} | ${marketLabel}) 當日分時`
+      : `${stock.name} (${stock.code} | ${marketLabel}) 日 K 走勢`;
+  const datasets = [
+    {
+      type: "line",
+      label: chartType === "intraday" ? "價格" : "收盤價",
+      data: prices,
+      yAxisID: "price",
+      borderColor: "#e04352",
+      backgroundColor: "rgba(224, 67, 82, 0.10)",
+      borderWidth: 2,
+      pointRadius: 0,
+      fill: chartType === "intraday",
+      lineTension: 0.2,
+    },
+  ];
+
+  if (chartType === "daily") {
+    datasets.push(
+      {
+        type: "line",
+        label: "5MA",
+        data: movingAverage(prices, 5),
+        yAxisID: "price",
+        borderColor: "#4f8cff",
+        borderWidth: 1.5,
+        pointRadius: 0,
+        fill: false,
+        lineTension: 0.1,
+      },
+      {
+        type: "line",
+        label: "20MA",
+        data: movingAverage(prices, 20),
+        yAxisID: "price",
+        borderColor: "#f0a202",
+        borderWidth: 1.5,
+        pointRadius: 0,
+        fill: false,
+        lineTension: 0.1,
+      }
+    );
+  }
+
+  datasets.push({
+    type: "bar",
+    label: "成交量(張)",
+    data: volumes,
+    yAxisID: "volume",
+    backgroundColor: volumeColors,
+    borderWidth: 0,
+  });
+
+  return {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      title: {
+        display: true,
+        text: title,
+        fontSize: 18,
+        fontColor: "#222",
+      },
+      legend: {
+        display: true,
+        labels: { boxWidth: 10 },
+      },
+      scales: {
+        xAxes: [
+          {
+            ticks: {
+              autoSkip: true,
+              maxTicksLimit: chartType === "intraday" ? 8 : 7,
+              maxRotation: 0,
+            },
+            gridLines: { color: "rgba(0,0,0,0.05)" },
+          },
+        ],
+        yAxes: [
+          {
+            id: "price",
+            position: "left",
+            ticks: { fontColor: "#e04352" },
+            gridLines: { color: "rgba(0,0,0,0.06)" },
+          },
+          {
+            id: "volume",
+            position: "right",
+            ticks: {
+              beginAtZero: true,
+              maxTicksLimit: 4,
+              fontColor: "#777",
+            },
+            gridLines: { display: false },
+          },
+        ],
+      },
+    },
+  };
+}
+
+function buildQuickChartLongUrl(chartConfig) {
+  const query = new URLSearchParams({
+    width: "900",
+    height: "520",
+    backgroundColor: "white",
+    c: JSON.stringify(chartConfig),
+  });
+  return `https://quickchart.io/chart?${query.toString()}`;
+}
+
+async function createQuickChartUrl(chartConfig) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), QUICKCHART_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(QUICKCHART_CREATE_URL, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        width: 900,
+        height: 520,
+        backgroundColor: "white",
+        chart: chartConfig,
+      }),
+    });
+
+    const text = await res.text();
+    if (res.ok) {
+      const json = JSON.parse(text);
+      if (json?.url && /^https:\/\//.test(json.url)) return json.url;
+    }
+
+    console.error("QuickChart create failed", res.status, text.slice(0, 100));
+  } catch (err) {
+    console.error("QuickChart create error", err?.message || err);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const longUrl = buildQuickChartLongUrl(chartConfig);
+  return longUrl.length < 1900 ? longUrl : null;
+}
+
+async function replyStockChart(event, stock, chartType) {
+  const history = await getStockHistoryWithFallback(stock, chartType);
+  if (!history) {
+    await replyMessageWithFallback(event, {
+      type: "text",
+      text: "線圖資料暫時取得失敗，請稍後再試。",
+    });
+    return;
+  }
+
+  const chartConfig = buildStockChartConfig({
+    stock,
+    symbol: history.symbol,
+    points: history.points,
+    chartType,
+  });
+  const chartUrl = await createQuickChartUrl(chartConfig);
+  if (!chartUrl) {
+    await replyMessageWithFallback(event, {
+      type: "text",
+      text: "線圖產生失敗，請稍後再試。",
+    });
+    return;
+  }
+
+  const marketLabel = getStockMarketLabelBySymbol(history.symbol, stock);
+  const typeLabel = chartType === "intraday" ? "當日分時圖" : "日 K 線圖";
+  await replyMessageWithFallback(event, [
+    {
+      type: "text",
+      text: `📈 ${stock.name}（${stock.code}｜${marketLabel}）${typeLabel}`,
+    },
+    {
+      type: "image",
+      originalContentUrl: chartUrl,
+      previewImageUrl: chartUrl,
+    },
+  ]);
 }
 
 
@@ -2935,6 +3267,34 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           text: lines.join("\n"),
         });
 
+        continue;
+      }
+
+      // ─────────────────────────────────────
+      // 📈 股票線圖（Quick Reply + QuickChart）
+      // ─────────────────────────────────────
+      if (/線圖|走勢|K線|日K|分時/.test(parsedMessage)) {
+        const stock = await findStock(parsedMessage);
+
+        if (!stock) {
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: "我找不到這檔股票 😅\n可以試試「3221 線圖」或「2330 K線」",
+          });
+          continue;
+        }
+
+        if (/分時|當日/.test(parsedMessage)) {
+          await replyStockChart(event, stock, "intraday");
+          continue;
+        }
+
+        if (/K線|日K|日線/.test(parsedMessage)) {
+          await replyStockChart(event, stock, "daily");
+          continue;
+        }
+
+        await replyMessageWithFallback(event, getStockChartMenuMessage(stock));
         continue;
       }
 
