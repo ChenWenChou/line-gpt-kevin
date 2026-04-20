@@ -2202,7 +2202,7 @@ async function findStock(query) {
 }
 
 async function getStockQuote(symbol) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=2d`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), STOCK_QUOTE_TIMEOUT_MS);
 
@@ -2235,31 +2235,43 @@ async function getStockQuote(symbol) {
   const meta = result.meta || {};
   const quote = result.indicators?.quote?.[0] || {};
   const closes = result.indicators?.quote?.[0]?.close || [];
+  const validCloses = closes.filter((v) => typeof v === "number");
 
   // ✅ 價格：優先用 regularMarketPrice，不行就用最後一根 close
   const price =
     meta.regularMarketPrice ??
-    closes.filter((v) => typeof v === "number").slice(-1)[0];
+    validCloses.slice(-1)[0];
 
   // ✅ 開盤價
   const open =
     meta.regularMarketOpen ??
     quote.open?.filter((v) => typeof v === "number")[0];
 
-  // ✅ 昨收
+  // Yahoo 對部分 .TWO 商品的 previousClose 會不穩，改用多個來源交叉備援。
+  const previousValidClose =
+    validCloses.length >= 2 ? validCloses[validCloses.length - 2] : undefined;
+  const prevCloseCandidates = [
+    meta.chartPreviousClose,
+    meta.previousClose,
+    previousValidClose,
+  ].filter((v) => typeof v === "number" && v > 0);
   const prevClose =
-    meta.previousClose ?? closes.filter((v) => typeof v === "number")[0];
+    prevCloseCandidates.find((v) => Math.abs(v - price) > 0.000001) ??
+    prevCloseCandidates[0];
 
   if (typeof price !== "number" || typeof prevClose !== "number") {
     return null;
   }
 
-  const change = price - prevClose;
-  const changePercent = (change / prevClose) * 100;
+  const changeRaw = price - prevClose;
+  const change = Math.abs(changeRaw) < 0.005 ? 0 : changeRaw;
+  const changePercentRaw = (change / prevClose) * 100;
+  const changePercent = Math.abs(changePercentRaw) < 0.005 ? 0 : changePercentRaw;
 
   return {
     price,
     open,
+    prevClose,
     change,
     changePercent,
     volume: meta.regularMarketVolume,
@@ -2277,7 +2289,8 @@ async function getStockQuoteWithFallback(stock) {
 
 function fmtTWPrice(n) {
   if (typeof n !== "number") return "--";
-  return n >= 100 ? n.toFixed(1) : n.toFixed(2);
+  const fixed = n >= 100 ? n.toFixed(1) : n.toFixed(2);
+  return Object.is(Number(fixed), -0) ? fixed.replace("-", "") : fixed;
 }
 // 聖經小卡（50 節，適合每日抽）
 const BIBLE_VERSES = [
@@ -2947,11 +2960,12 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           if (!result) throw new Error("no data");
           const q = result.quote;
 
-          const sign = q.change >= 0 ? "+" : "";
+          const sign = q.change > 0 ? "+" : "";
           const percent =
             typeof q.changePercent === "number"
               ? q.changePercent.toFixed(2)
               : "--";
+          const percentSign = q.changePercent > 0 ? "+" : "";
           const volumeLots =
             typeof q.volume === "number"
               ? Math.round(q.volume / 1000).toLocaleString()
@@ -2962,11 +2976,12 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           const text = `📊 ${stock.name}（${stock.code}｜${marketLabel}）
 
 現價：${fmtTWPrice(q.price)}
-漲跌：${sign}${fmtTWPrice(q.change)}（${sign}${percent}%）
+漲跌：${sign}${fmtTWPrice(q.change)}（${percentSign}${percent}%）
 開盤：${fmtTWPrice(q.open)}
+昨收：${fmtTWPrice(q.prevClose)}
 成交量：${volumeLots} 張
 
-※ 資料來源：Yahoo Finance（延遲報價）`;
+※ 盤中延遲報價，漲跌以 Yahoo 昨收估算`;
 
           await replyMessageWithFallback(event, {
             type: "text",
