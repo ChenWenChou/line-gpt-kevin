@@ -2421,12 +2421,18 @@ async function getStockHistory(symbol, { range, interval, chartType }) {
   const result = json.chart?.result?.[0];
   const timestamps = result?.timestamp || [];
   const quote = result?.indicators?.quote?.[0] || {};
+  const opens = quote.open || [];
+  const highs = quote.high || [];
+  const lows = quote.low || [];
   const closes = quote.close || [];
   const volumes = quote.volume || [];
 
   const points = timestamps
     .map((ts, index) => ({
       label: formatStockChartLabel(ts, chartType, range),
+      open: opens[index],
+      high: highs[index],
+      low: lows[index],
       close: closes[index],
       volume: volumes[index],
     }))
@@ -2496,54 +2502,97 @@ async function getStockHistoryWithFallback(stock, chartType) {
 function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel }) {
   const labels = points.map((p) => p.label);
   const prices = points.map((p) => Number(p.close.toFixed(2)));
+  const candleData = points.map((p) => ({
+    x: p.label,
+    o: Number((p.open ?? p.close).toFixed(2)),
+    h: Number((p.high ?? p.close).toFixed(2)),
+    l: Number((p.low ?? p.close).toFixed(2)),
+    c: Number(p.close.toFixed(2)),
+  }));
   const volumes = points.map((p) =>
     typeof p.volume === "number" ? Math.round(p.volume / 1000) : 0
   );
-  const volumeColors = prices.map((price, index) => {
-    const prev = index > 0 ? prices[index - 1] : price;
-    return price >= prev ? "rgba(224, 67, 82, 0.35)" : "rgba(12, 170, 90, 0.35)";
+  const pointColors = points.map((point, index) => {
+    const open = typeof point.open === "number" ? point.open : prices[index - 1] ?? point.close;
+    return point.close >= open ? "#e04352" : "#0caa5a";
+  });
+  const volumeColors = pointColors.map((color) => {
+    return color === "#e04352"
+      ? "rgba(224, 67, 82, 0.28)"
+      : "rgba(12, 170, 90, 0.28)";
   });
   const marketLabel = getStockMarketLabelBySymbol(symbol, stock);
   const title =
     titleLabel || `${stock.name} (${stock.code} | ${marketLabel}) 日 K 走勢`;
-  const datasets = [
-    {
-      type: "line",
-      label: chartType === "intraday" ? "價格" : "收盤價",
-      data: prices,
-      yAxisID: "price",
-      borderColor: "#e04352",
-      backgroundColor: "rgba(224, 67, 82, 0.10)",
-      borderWidth: 2,
-      pointRadius: 0,
-      fill: chartType === "intraday",
-      lineTension: 0.2,
-    },
-  ];
+  const dataPoint = (label, value) =>
+    typeof value === "number" ? { x: label, y: value } : { x: label, y: null };
+  const datasets =
+    chartType === "daily"
+      ? [
+          {
+            type: "candlestick",
+            label: "K棒",
+            data: candleData,
+            yAxisID: "price",
+            color: {
+              up: "#e04352",
+              down: "#0caa5a",
+              unchanged: "#777777",
+            },
+          },
+        ]
+      : [
+          {
+            type: "line",
+            label: "價格",
+            data: labels.map((label, index) => dataPoint(label, prices[index])),
+            yAxisID: "price",
+            borderColor: "#e04352",
+            backgroundColor: "rgba(224, 67, 82, 0.12)",
+            borderWidth: 2.4,
+            pointRadius: 0,
+            fill: true,
+            tension: 0.22,
+          },
+        ];
 
   if (chartType === "daily") {
+    const ma5 = movingAverage(prices, 5);
+    const ma20 = movingAverage(prices, 20);
+    const ma60 = movingAverage(prices, 60);
     datasets.push(
       {
         type: "line",
         label: "5MA",
-        data: movingAverage(prices, 5),
+        data: labels.map((label, index) => dataPoint(label, ma5[index])),
         yAxisID: "price",
         borderColor: "#4f8cff",
-        borderWidth: 1.5,
+        borderWidth: 1.6,
         pointRadius: 0,
         fill: false,
-        lineTension: 0.1,
+        tension: 0.12,
       },
       {
         type: "line",
         label: "20MA",
-        data: movingAverage(prices, 20),
+        data: labels.map((label, index) => dataPoint(label, ma20[index])),
         yAxisID: "price",
         borderColor: "#f0a202",
-        borderWidth: 1.5,
+        borderWidth: 1.6,
         pointRadius: 0,
         fill: false,
-        lineTension: 0.1,
+        tension: 0.12,
+      },
+      {
+        type: "line",
+        label: "60MA",
+        data: labels.map((label, index) => dataPoint(label, ma60[index])),
+        yAxisID: "price",
+        borderColor: "#d8a600",
+        borderWidth: 1.4,
+        pointRadius: 0,
+        fill: false,
+        tension: 0.12,
       }
     );
   }
@@ -2551,55 +2600,88 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
   datasets.push({
     type: "bar",
     label: "成交量(張)",
-    data: volumes,
+    data: labels.map((label, index) => dataPoint(label, volumes[index])),
     yAxisID: "volume",
     backgroundColor: volumeColors,
     borderWidth: 0,
+    barPercentage: 0.75,
+    categoryPercentage: 0.9,
   });
 
   return {
-    type: "bar",
+    type: chartType === "daily" ? "candlestick" : "line",
     data: { labels, datasets },
     options: {
-      title: {
-        display: true,
-        text: title,
-        fontSize: 18,
-        fontColor: "#222",
+      responsive: true,
+      maintainAspectRatio: false,
+      layout: {
+        padding: {
+          top: 8,
+          right: 14,
+          bottom: 4,
+          left: 8,
+        },
       },
-      legend: {
-        display: true,
-        labels: { boxWidth: 10 },
+      plugins: {
+        title: {
+          display: true,
+          text: title,
+          color: "#222222",
+          font: {
+            size: 22,
+            weight: "bold",
+          },
+          padding: {
+            top: 6,
+            bottom: 12,
+          },
+        },
+        legend: {
+          display: true,
+          position: "top",
+          labels: {
+            boxWidth: 12,
+            boxHeight: 12,
+            color: "#777777",
+            font: { size: 13 },
+            padding: 14,
+          },
+        },
       },
       scales: {
-        xAxes: [
-          {
-            ticks: {
-              autoSkip: true,
-              maxTicksLimit: chartType === "intraday" ? 6 : 7,
-              maxRotation: 0,
-            },
-            gridLines: { color: "rgba(0,0,0,0.05)" },
+        x: {
+          type: "category",
+          ticks: {
+            color: "#777777",
+            autoSkip: true,
+            maxTicksLimit: chartType === "intraday" ? 6 : 7,
+            maxRotation: 0,
           },
-        ],
-        yAxes: [
-          {
-            id: "price",
-            position: "left",
-            ticks: { fontColor: "#e04352" },
-            gridLines: { color: "rgba(0,0,0,0.06)" },
+          grid: { color: "rgba(0,0,0,0.055)" },
+          border: { color: "rgba(0,0,0,0.18)" },
+        },
+        price: {
+          type: "linear",
+          position: "left",
+          ticks: {
+            color: "#e04352",
+            padding: 8,
           },
-          {
-            id: "volume",
-            position: "right",
-            ticks: {
-              beginAtZero: true,
-              maxTicksLimit: 4,
-              fontColor: "#777",
-            },
-            gridLines: { display: false },
+          grid: { color: "rgba(0,0,0,0.065)" },
+          border: { color: "rgba(0,0,0,0.18)" },
+        },
+        volume: {
+          type: "linear",
+          position: "right",
+          beginAtZero: true,
+          ticks: {
+            color: "#777777",
+            maxTicksLimit: 4,
+            padding: 8,
           },
-        ],
+          grid: { display: false },
+          border: { display: false },
+        },
       },
     },
   };
@@ -2607,6 +2689,7 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
 
 function buildQuickChartLongUrl(chartConfig) {
   const query = new URLSearchParams({
+    version: "4",
     width: "900",
     height: "520",
     backgroundColor: "white",
@@ -2625,6 +2708,7 @@ async function createQuickChartUrl(chartConfig) {
       signal: controller.signal,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        version: "4",
         width: 900,
         height: 520,
         backgroundColor: "white",
