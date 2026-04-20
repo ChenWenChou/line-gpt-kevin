@@ -2613,22 +2613,24 @@ function buildStockChartConfig({ stock, symbol, points, chartType, titleLabel })
     );
   }
 
-  datasets.push({
-    type: "bar",
-    label: "成交量(張)",
-    data: labels.map((label, index) => dataPoint(label, volumes[index])),
-    xAxisID: "x",
-    yAxisID: "volume",
-    backgroundColor: volumeColors,
-    borderWidth: 0,
-    barPercentage: chartType === "daily" ? 0.42 : 0.55,
-    categoryPercentage: chartType === "daily" ? 0.72 : 0.75,
-    maxBarThickness: chartType === "daily" ? 7 : 10,
-    order: 20,
-  });
+  if (chartType !== "daily") {
+    datasets.push({
+      type: "bar",
+      label: "成交量(張)",
+      data: labels.map((label, index) => dataPoint(label, volumes[index])),
+      xAxisID: "x",
+      yAxisID: "volume",
+      backgroundColor: volumeColors,
+      borderWidth: 0,
+      barPercentage: 0.55,
+      categoryPercentage: 0.75,
+      maxBarThickness: 10,
+      order: 20,
+    });
+  }
 
   return {
-    type: chartType === "daily" ? "bar" : "line",
+    type: chartType === "daily" ? "candlestick" : "line",
     data: { labels, datasets },
     options: {
       responsive: true,
