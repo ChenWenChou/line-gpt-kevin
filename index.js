@@ -143,6 +143,72 @@ async function redisZRem(key, member) {
   }
 }
 
+async function redisSAdd(key, member) {
+  if (!(await ensureRedisReady())) return false;
+  try {
+    await redisClient.sadd(key, member);
+    return true;
+  } catch (err) {
+    markRedisUnavailable(err, `SADD failed (${key})`);
+    return false;
+  }
+}
+
+async function redisSMembers(key) {
+  if (!(await ensureRedisReady())) return [];
+  try {
+    const members = await redisClient.smembers(key);
+    return Array.isArray(members) ? members : [];
+  } catch (err) {
+    markRedisUnavailable(err, `SMEMBERS failed (${key})`);
+    return [];
+  }
+}
+
+async function redisRPush(key, value) {
+  if (!(await ensureRedisReady())) return false;
+  try {
+    await redisClient.rpush(key, value);
+    return true;
+  } catch (err) {
+    markRedisUnavailable(err, `RPUSH failed (${key})`);
+    return false;
+  }
+}
+
+async function redisLRange(key, start, stop) {
+  if (!(await ensureRedisReady())) return [];
+  try {
+    const values = await redisClient.lrange(key, start, stop);
+    return Array.isArray(values) ? values : [];
+  } catch (err) {
+    markRedisUnavailable(err, `LRANGE failed (${key})`);
+    return [];
+  }
+}
+
+async function redisLTrim(key, start, stop) {
+  if (!(await ensureRedisReady())) return false;
+  try {
+    await redisClient.ltrim(key, start, stop);
+    return true;
+  } catch (err) {
+    markRedisUnavailable(err, `LTRIM failed (${key})`);
+    return false;
+  }
+}
+
+async function redisExpire(key, ttlSeconds) {
+  if (!(await ensureRedisReady())) return false;
+  try {
+    await redisClient.expire(key, ttlSeconds);
+    return true;
+  } catch (err) {
+    markRedisUnavailable(err, `EXPIRE failed (${key})`);
+    return false;
+  }
+}
+
 async function redisDel(key) {
   if (!(await ensureRedisReady())) return 0;
   try {
@@ -1919,6 +1985,22 @@ const STOCK_QUOTE_TIMEOUT_MS = Number(process.env.STOCK_QUOTE_TIMEOUT_MS || 6000
 const STOCK_HISTORY_TIMEOUT_MS = Number(
   process.env.STOCK_HISTORY_TIMEOUT_MS || 8000
 );
+const STOCK_REALTIME_TIMEOUT_MS = Number(
+  process.env.STOCK_REALTIME_TIMEOUT_MS || 5000
+);
+const STOCK_INTRADAY_WATCHLIST_KEY = "stock:intraday:watchlist";
+const STOCK_INTRADAY_TTL_SECONDS = Number(
+  process.env.STOCK_INTRADAY_TTL_SECONDS || 60 * 60 * 36
+);
+const STOCK_INTRADAY_MAX_POINTS = Number(
+  process.env.STOCK_INTRADAY_MAX_POINTS || 320
+);
+const STOCK_INTRADAY_MIN_POINTS = Number(
+  process.env.STOCK_INTRADAY_MIN_POINTS || 3
+);
+const STOCK_INTRADAY_COLLECT_LIMIT = Number(
+  process.env.STOCK_INTRADAY_COLLECT_LIMIT || 20
+);
 const QUICKCHART_CREATE_URL = "https://quickchart.io/chart/create";
 const QUICKCHART_TIMEOUT_MS = Number(process.env.QUICKCHART_TIMEOUT_MS || 8000);
 
@@ -2284,6 +2366,35 @@ async function getStockQuote(symbol) {
 }
 
 async function getStockQuoteWithFallback(stock) {
+  const realtime = await fetchTwseMisRealtime(stock);
+  if (
+    realtime &&
+    typeof realtime.price === "number" &&
+    typeof realtime.previousClose === "number" &&
+    realtime.previousClose > 0
+  ) {
+    const changeRaw = realtime.price - realtime.previousClose;
+    const change = Math.abs(changeRaw) < 0.005 ? 0 : changeRaw;
+    const changePercentRaw = (change / realtime.previousClose) * 100;
+    const changePercent =
+      Math.abs(changePercentRaw) < 0.005 ? 0 : changePercentRaw;
+    return {
+      quote: {
+        price: realtime.price,
+        open: realtime.open,
+        prevClose: realtime.previousClose,
+        change,
+        changePercent,
+        volume:
+          typeof realtime.cumulativeVolume === "number"
+            ? realtime.cumulativeVolume * 1000
+            : undefined,
+      },
+      symbol: stock.symbol || `${stock.code}.TW`,
+      source: realtime.source,
+    };
+  }
+
   for (const symbol of getStockCandidateSymbols(stock)) {
     const quote = await getStockQuote(symbol);
     if (quote) return { quote, symbol };
@@ -2295,6 +2406,260 @@ function getStockMarketLabelBySymbol(symbol, stock) {
   if (symbol?.endsWith(".TWO") || stock?.market === "TPEX") return "上櫃";
   if (symbol?.endsWith(".TW") || stock?.market === "TWSE") return "上市";
   return "台股";
+}
+
+function getRealtimeExchangePrefix(stock) {
+  return stock?.market === "TPEX" || stock?.symbol?.endsWith(".TWO")
+    ? "otc"
+    : "tse";
+}
+
+function parseMarketNumber(value) {
+  const text = String(value ?? "")
+    .trim()
+    .replace(/,/g, "");
+  if (!text || text === "-" || text === "--") return null;
+  const n = Number(text);
+  return Number.isFinite(n) ? n : null;
+}
+
+function timestampFromTwseMis(row) {
+  const tlong = Number(row?.tlong);
+  if (Number.isFinite(tlong) && tlong > 0) {
+    return Math.floor(tlong / 1000);
+  }
+
+  const d = String(row?.d || "");
+  const t = String(row?.t || "");
+  const dateMatch = d.match(/^(\d{4})(\d{2})(\d{2})$/);
+  const timeMatch = t.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!dateMatch || !timeMatch) return Math.floor(Date.now() / 1000);
+
+  return Math.floor(
+    utcMsFromTaipeiParts({
+      year: Number(dateMatch[1]),
+      month: Number(dateMatch[2]),
+      day: Number(dateMatch[3]),
+      hour: Number(timeMatch[1]),
+      minute: Number(timeMatch[2]),
+    }) / 1000
+  );
+}
+
+function isTaiwanTradingCollectionTime(nowMs = Date.now()) {
+  const parts = taipeiPartsFromUtcMs(nowMs);
+  const shifted = new Date(nowMs + TAIPEI_UTC_OFFSET_MINUTES * 60 * 1000);
+  const weekday = shifted.getUTCDay();
+  if (weekday === 0 || weekday === 6) return false;
+
+  const minutes = parts.hour * 60 + parts.minute;
+  return minutes >= 8 * 60 + 55 && minutes <= 13 * 60 + 35;
+}
+
+function getIntradaySnapshotKey(code, dateKey = taipeiDateKey(Date.now())) {
+  return `stock:intraday:${dateKey}:${code}`;
+}
+
+async function fetchTwseMisRealtime(stock) {
+  const code = normalizeStockCode(stock?.code);
+  if (!code) return null;
+
+  const exchangePrefix = getRealtimeExchangePrefix(stock);
+  const exCh = `${exchangePrefix}_${code}.tw`;
+  const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${encodeURIComponent(
+    exCh
+  )}&json=1&delay=0&_=${Date.now()}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), STOCK_REALTIME_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "user-agent": "Mozilla/5.0",
+        accept: "application/json,text/plain,*/*",
+        referer: `https://mis.twse.com.tw/stock/fibest.jsp?stock=${code}`,
+      },
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.warn("TWSE MIS realtime status", code, res.status, text.slice(0, 80));
+      return null;
+    }
+
+    const json = await res.json();
+    const row = Array.isArray(json?.msgArray) ? json.msgArray[0] : null;
+    if (!row) return null;
+
+    const price = parseMarketNumber(row.z);
+    if (typeof price !== "number") return null;
+
+    const open = parseMarketNumber(row.o) ?? price;
+    const high = parseMarketNumber(row.h) ?? Math.max(open, price);
+    const low = parseMarketNumber(row.l) ?? Math.min(open, price);
+    const previousClose = parseMarketNumber(row.y);
+    const cumulativeVolume = parseMarketNumber(row.v);
+    const tradeVolume = parseMarketNumber(row.tv);
+
+    return {
+      code,
+      name: row.n || stock.name || code,
+      market: exchangePrefix === "otc" ? "TPEX" : "TWSE",
+      timestamp: timestampFromTwseMis(row),
+      open,
+      high,
+      low,
+      close: price,
+      price,
+      previousClose,
+      cumulativeVolume,
+      tradeVolume,
+      source: exchangePrefix === "otc" ? "tpex-realtime" : "twse-realtime",
+    };
+  } catch (err) {
+    console.warn("TWSE MIS realtime fetch failed", code, err?.message || err);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function rememberIntradayWatchStock(stock) {
+  const code = normalizeStockCode(stock?.code);
+  if (!code) return false;
+
+  return redisSAdd(
+    STOCK_INTRADAY_WATCHLIST_KEY,
+    JSON.stringify({
+      code,
+      name: stock.name || code,
+      market: stock.market || "TWSE",
+      symbol: stock.symbol || `${code}.TW`,
+    })
+  );
+}
+
+async function collectWatchedStockIntradaySnapshots() {
+  if (!isTaiwanTradingCollectionTime()) {
+    return { watched: 0, collected: 0, skipped: "outside-trading-time" };
+  }
+
+  const members = await redisSMembers(STOCK_INTRADAY_WATCHLIST_KEY);
+  const limit =
+    Number.isFinite(STOCK_INTRADAY_COLLECT_LIMIT) &&
+    STOCK_INTRADAY_COLLECT_LIMIT > 0
+      ? STOCK_INTRADAY_COLLECT_LIMIT
+      : 20;
+  const watchedStocks = members
+    .slice(0, limit)
+    .map((raw) => {
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    })
+    .filter((stock) => normalizeStockCode(stock?.code));
+
+  let collected = 0;
+
+  for (const stock of watchedStocks) {
+    const snapshot = await fetchTwseMisRealtime(stock);
+    if (!snapshot) continue;
+
+    const key = getIntradaySnapshotKey(snapshot.code);
+    const latestRaw = await redisLRange(key, -1, -1);
+    let latest = null;
+    try {
+      latest = latestRaw[0] ? JSON.parse(latestRaw[0]) : null;
+    } catch {
+      latest = null;
+    }
+    if (latest?.timestamp === snapshot.timestamp) continue;
+
+    const saved = await redisRPush(key, JSON.stringify(snapshot));
+    if (!saved) continue;
+
+    const maxPoints =
+      Number.isFinite(STOCK_INTRADAY_MAX_POINTS) &&
+      STOCK_INTRADAY_MAX_POINTS > 0
+        ? STOCK_INTRADAY_MAX_POINTS
+        : 320;
+    await redisLTrim(key, -maxPoints, -1);
+    await redisExpire(
+      key,
+      Number.isFinite(STOCK_INTRADAY_TTL_SECONDS) &&
+        STOCK_INTRADAY_TTL_SECONDS > 0
+        ? STOCK_INTRADAY_TTL_SECONDS
+        : 60 * 60 * 36
+    );
+    collected++;
+  }
+
+  return { watched: watchedStocks.length, collected };
+}
+
+async function getCollectedIntradayHistory(stock) {
+  const code = normalizeStockCode(stock?.code);
+  if (!code) return null;
+
+  const raw = await redisLRange(getIntradaySnapshotKey(code), 0, -1);
+  const snapshots = raw
+    .map((item) => {
+      try {
+        return JSON.parse(item);
+      } catch {
+        return null;
+      }
+    })
+    .filter((p) => p && typeof p.close === "number" && Number.isFinite(p.timestamp))
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  const minPoints =
+    Number.isFinite(STOCK_INTRADAY_MIN_POINTS) && STOCK_INTRADAY_MIN_POINTS > 0
+      ? STOCK_INTRADAY_MIN_POINTS
+      : 3;
+  if (snapshots.length < minPoints) return null;
+
+  const points = snapshots.map((point, index) => {
+    const previous = snapshots[index - 1];
+    const cumulative = point.cumulativeVolume;
+    const previousCumulative = previous?.cumulativeVolume;
+    const volume =
+      typeof cumulative === "number" && typeof previousCumulative === "number"
+        ? Math.max(cumulative - previousCumulative, 0)
+        : point.tradeVolume || 0;
+
+    return {
+      timestamp: point.timestamp,
+      label: formatStockChartLabel(point.timestamp, "intraday"),
+      open: point.open,
+      high: point.high,
+      low: point.low,
+      close: point.close,
+      volume,
+    };
+  });
+
+  return {
+    symbol: stock.symbol || `${code}.TW`,
+    chartType: "intraday",
+    displayChartType: "intraday",
+    range: "1d",
+    interval: "realtime",
+    source: "twse-tpex-realtime",
+    points: downsamplePoints(points, 75),
+  };
+}
+
+function getPublicBaseUrl() {
+  const raw =
+    process.env.PUBLIC_BASE_URL ||
+    process.env.LINE_BOT_BASE_URL ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "") ||
+    "https://line-gpt-kevin.vercel.app";
+  return raw.replace(/\/+$/, "");
 }
 
 function getStockChartMenuMessage(stock) {
@@ -2395,6 +2760,213 @@ function getStockChartTitleLabel(stock, history) {
   return `${stock.name} (${stock.code} | ${marketLabel}) 日 K 走勢`;
 }
 
+function escapeXml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function nicePriceTicks(min, max, count = 6) {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {
+    return [min || 0];
+  }
+  const rawStep = (max - min) / Math.max(count - 1, 1);
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const normalized = rawStep / magnitude;
+  const niceNormalized =
+    normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  const step = niceNormalized * magnitude;
+  const start = Math.floor(min / step) * step;
+  const end = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = start; v <= end + step * 0.5; v += step) {
+    ticks.push(Number(v.toFixed(2)));
+  }
+  return ticks.slice(-8);
+}
+
+function svgPolyline(points, valueKey, xForIndex, yForPrice) {
+  const parts = [];
+  let current = [];
+
+  points.forEach((point, index) => {
+    const value = point[valueKey];
+    if (typeof value !== "number") {
+      if (current.length) {
+        parts.push(current);
+        current = [];
+      }
+      return;
+    }
+    current.push(`${xForIndex(index).toFixed(2)},${yForPrice(value).toFixed(2)}`);
+  });
+
+  if (current.length) parts.push(current);
+  return parts
+    .filter((segment) => segment.length >= 2)
+    .map((segment) => `<polyline points="${segment.join(" ")}" />`)
+    .join("");
+}
+
+function buildStockKLineSvg({ stock, symbol, points }) {
+  const width = 1200;
+  const height = 720;
+  const chartX = 78;
+  const chartY = 112;
+  const chartW = 1040;
+  const chartH = 405;
+  const volumeY = 555;
+  const volumeH = 92;
+  const axisY = 676;
+  const n = points.length;
+  const marketLabel = getStockMarketLabelBySymbol(symbol, stock);
+  const xStep = n > 1 ? chartW / (n - 1) : chartW;
+  const candleW = Math.max(4, Math.min(10, xStep * 0.58));
+  const volumeW = Math.max(2, Math.min(8, xStep * 0.45));
+  const priceValues = [];
+
+  points.forEach((p) => {
+    [p.high, p.low, p.open, p.close, p.ma5, p.ma20, p.ma60].forEach((value) => {
+      if (typeof value === "number") priceValues.push(value);
+    });
+  });
+
+  const rawMin = Math.min(...priceValues);
+  const rawMax = Math.max(...priceValues);
+  const pad = Math.max((rawMax - rawMin) * 0.08, rawMax * 0.01, 0.2);
+  const minPrice = rawMin - pad;
+  const maxPrice = rawMax + pad;
+  const priceTicks = nicePriceTicks(minPrice, maxPrice, 6);
+  const maxVolume = Math.max(
+    ...points.map((p) => (typeof p.volume === "number" ? p.volume : 0)),
+    1
+  );
+  const xForIndex = (index) => chartX + index * xStep;
+  const yForPrice = (price) =>
+    chartY + ((maxPrice - price) / (maxPrice - minPrice)) * chartH;
+  const yForVolume = (volume) =>
+    volumeY + volumeH - (Math.max(volume, 0) / maxVolume) * volumeH;
+  const dateTickIndexes = [...new Set([
+    0,
+    Math.round((n - 1) * 0.2),
+    Math.round((n - 1) * 0.4),
+    Math.round((n - 1) * 0.6),
+    Math.round((n - 1) * 0.8),
+    n - 1,
+  ])].filter((i) => i >= 0 && i < n);
+
+  const priceGrid = priceTicks
+    .map((tick) => {
+      const y = yForPrice(tick);
+      return `
+        <line x1="${chartX}" y1="${y}" x2="${chartX + chartW}" y2="${y}" stroke="rgba(0,0,0,0.07)" />
+        <text x="${chartX - 14}" y="${y + 5}" text-anchor="end" class="price-label">${tick.toFixed(2)}</text>
+      `;
+    })
+    .join("");
+
+  const dateLabels = dateTickIndexes
+    .map((index) => {
+      const x = xForIndex(index);
+      const label = points[index]?.label || "";
+      return `
+        <line x1="${x}" y1="${chartY}" x2="${x}" y2="${volumeY + volumeH}" stroke="rgba(0,0,0,0.045)" />
+        <text x="${x}" y="${axisY}" text-anchor="middle" class="date-label">${escapeXml(label)}</text>
+      `;
+    })
+    .join("");
+
+  const candles = points
+    .map((point, index) => {
+      const x = xForIndex(index);
+      const open = typeof point.open === "number" ? point.open : point.close;
+      const close = point.close;
+      const high = typeof point.high === "number" ? point.high : Math.max(open, close);
+      const low = typeof point.low === "number" ? point.low : Math.min(open, close);
+      const up = close >= open;
+      const color = up ? "#df3f50" : "#079b55";
+      const yHigh = yForPrice(high);
+      const yLow = yForPrice(low);
+      const yOpen = yForPrice(open);
+      const yClose = yForPrice(close);
+      const bodyY = Math.min(yOpen, yClose);
+      const bodyH = Math.max(Math.abs(yClose - yOpen), 1.2);
+      return `
+        <line x1="${x}" y1="${yHigh}" x2="${x}" y2="${yLow}" stroke="#5f6368" stroke-width="1.3" />
+        <rect x="${x - candleW / 2}" y="${bodyY}" width="${candleW}" height="${bodyH}" fill="${color}" stroke="${color}" rx="0.8" />
+      `;
+    })
+    .join("");
+
+  const volumes = points
+    .map((point, index) => {
+      const x = xForIndex(index);
+      const open = typeof point.open === "number" ? point.open : points[index - 1]?.close ?? point.close;
+      const up = point.close >= open;
+      const color = up ? "rgba(223,63,80,0.34)" : "rgba(7,155,85,0.34)";
+      const volume = typeof point.volume === "number" ? point.volume : 0;
+      const y = yForVolume(volume);
+      return `<rect x="${x - volumeW / 2}" y="${y}" width="${volumeW}" height="${volumeY + volumeH - y}" fill="${color}" />`;
+    })
+    .join("");
+
+  const ma5 = svgPolyline(points, "ma5", xForIndex, yForPrice);
+  const ma20 = svgPolyline(points, "ma20", xForIndex, yForPrice);
+  const ma60 = svgPolyline(points, "ma60", xForIndex, yForPrice);
+  const latest = points[points.length - 1] || {};
+  const latestClose = typeof latest.close === "number" ? latest.close.toFixed(2) : "--";
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <style>
+    .title { font: 700 30px -apple-system, BlinkMacSystemFont, "Noto Sans TC", "PingFang TC", Arial, sans-serif; fill: #222; }
+    .subtitle { font: 500 15px -apple-system, BlinkMacSystemFont, "Noto Sans TC", "PingFang TC", Arial, sans-serif; fill: #777; }
+    .legend { font: 500 15px -apple-system, BlinkMacSystemFont, "Noto Sans TC", "PingFang TC", Arial, sans-serif; fill: #777; }
+    .price-label { font: 500 14px -apple-system, BlinkMacSystemFont, Arial, sans-serif; fill: #df3f50; }
+    .date-label { font: 500 14px -apple-system, BlinkMacSystemFont, Arial, sans-serif; fill: #777; }
+    .note { font: 500 13px -apple-system, BlinkMacSystemFont, "Noto Sans TC", "PingFang TC", Arial, sans-serif; fill: #888; }
+    .ma5 { fill: none; stroke: #4f8cff; stroke-width: 2.1; stroke-linejoin: round; stroke-linecap: round; }
+    .ma20 { fill: none; stroke: #f0a202; stroke-width: 2.1; stroke-linejoin: round; stroke-linecap: round; }
+    .ma60 { fill: none; stroke: #d8a600; stroke-width: 2.0; stroke-linejoin: round; stroke-linecap: round; }
+  </style>
+  <rect width="100%" height="100%" fill="#ffffff" />
+  <text x="${width / 2}" y="42" text-anchor="middle" class="title">${escapeXml(stock.name)}（${escapeXml(stock.code)}｜${escapeXml(marketLabel)}）日 K 走勢</text>
+  <text x="${width / 2}" y="68" text-anchor="middle" class="subtitle">最新收盤 ${latestClose}｜資料來源 Yahoo Finance｜日 K 通常於收盤後更新</text>
+
+  <g transform="translate(418 92)">
+    <rect x="0" y="-10" width="13" height="13" fill="#5f6368" /><text x="22" y="2" class="legend">K棒</text>
+    <line x1="76" y1="-4" x2="101" y2="-4" stroke="#4f8cff" stroke-width="3" /><text x="110" y="2" class="legend">5MA</text>
+    <line x1="164" y1="-4" x2="189" y2="-4" stroke="#f0a202" stroke-width="3" /><text x="198" y="2" class="legend">20MA</text>
+    <line x1="260" y1="-4" x2="285" y2="-4" stroke="#d8a600" stroke-width="3" /><text x="294" y="2" class="legend">60MA</text>
+    <rect x="370" y="-10" width="13" height="13" fill="rgba(223,63,80,0.34)" /><text x="392" y="2" class="legend">成交量</text>
+  </g>
+
+  <rect x="${chartX}" y="${chartY}" width="${chartW}" height="${chartH}" fill="#fff" stroke="rgba(0,0,0,0.12)" />
+  ${priceGrid}
+  ${dateLabels}
+  <g>${candles}</g>
+  <g class="ma5">${ma5}</g>
+  <g class="ma20">${ma20}</g>
+  <g class="ma60">${ma60}</g>
+
+  <rect x="${chartX}" y="${volumeY}" width="${chartW}" height="${volumeH}" fill="#fff" stroke="rgba(0,0,0,0.08)" />
+  <g>${volumes}</g>
+  <text x="${chartX}" y="${volumeY - 8}" class="note">成交量</text>
+  <text x="${chartX}" y="${height - 18}" class="note">台股紅漲綠跌；均線以完整 6 個月日資料計算，顯示最近 ${n} 根。</text>
+</svg>`;
+}
+
+function getStockKLineSvgUrl(stock) {
+  const params = new URLSearchParams({
+    code: stock.code,
+    t: String(Date.now()),
+  });
+  return `${getPublicBaseUrl()}/api/stock-kline.svg?${params.toString()}`;
+}
+
 async function getStockHistory(symbol, { range, interval, chartType }) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
   const controller = new AbortController();
@@ -2434,6 +3006,7 @@ async function getStockHistory(symbol, { range, interval, chartType }) {
 
   const points = timestamps
     .map((ts, index) => ({
+      timestamp: ts,
       label: formatStockChartLabel(ts, chartType, range),
       open: opens[index],
       high: highs[index],
@@ -2461,6 +3034,11 @@ async function getStockHistory(symbol, { range, interval, chartType }) {
 }
 
 async function getStockHistoryWithFallback(stock, chartType) {
+  if (chartType === "intraday") {
+    const collected = await getCollectedIntradayHistory(stock);
+    if (collected) return collected;
+  }
+
   const requests =
     chartType === "intraday"
       ? [
@@ -2754,12 +3332,50 @@ async function createQuickChartUrl(chartConfig) {
 }
 
 async function replyStockChart(event, stock, chartType) {
+  if (chartType === "daily") {
+    const marketLabel = getStockMarketLabelBySymbol(stock.symbol, stock);
+    const chartUrl = getStockKLineSvgUrl(stock);
+
+    await replyMessageWithFallback(event, [
+      {
+        type: "text",
+        text: `📈 ${stock.name}（${stock.code}｜${marketLabel}）日 K 線圖\n※ 日 K 資料通常於收盤後更新，盤中可能停在上一交易日。`,
+      },
+      {
+        type: "image",
+        originalContentUrl: chartUrl,
+        previewImageUrl: chartUrl,
+      },
+    ]);
+    return;
+  }
+
+  await rememberIntradayWatchStock(stock);
   const history = await getStockHistoryWithFallback(stock, chartType);
   if (!history) {
     await replyMessageWithFallback(event, {
       type: "text",
       text: "線圖資料暫時取得失敗，請稍後再試。",
     });
+    return;
+  }
+
+  if ((history.chartType || chartType) === "daily") {
+    const marketLabel = getStockMarketLabelBySymbol(history.symbol, stock);
+    const chartUrl = getStockKLineSvgUrl(stock);
+    await replyMessageWithFallback(event, [
+      {
+        type: "text",
+        text: `📈 ${stock.name}（${stock.code}｜${marketLabel}）${
+          history.fallbackLabel || "日 K 線圖"
+        }\n※ 日 K 資料通常於收盤後更新，盤中可能停在上一交易日。`,
+      },
+      {
+        type: "image",
+        originalContentUrl: chartUrl,
+        previewImageUrl: chartUrl,
+      },
+    ]);
     return;
   }
 
@@ -2790,6 +3406,8 @@ async function replyStockChart(event, stock, chartType) {
       ? "\n※ 日 K 資料通常於收盤後更新，盤中可能停在上一交易日。"
       : displayChartType === "intraday5d"
         ? "\n※ Yahoo 未提供完整當日分時時，會改用近 5 日分時資料。"
+        : history.source === "twse-tpex-realtime"
+          ? "\n※ 使用 TWSE/TPEX 盤中快照資料；新查詢股票會先收集幾分鐘後逐步完整。"
         : "";
   await replyMessageWithFallback(event, [
     {
@@ -3293,6 +3911,7 @@ app.get("/api/run-reminders", async (req, res) => {
   let sent = 0;
   let retried = 0;
   let failed = 0;
+  let stockSnapshots = { watched: 0, collected: 0 };
 
   for (let i = 0; i < 5; i++) {
     const stats = await processDueReminders();
@@ -3304,12 +3923,15 @@ app.get("/api/run-reminders", async (req, res) => {
     if (stats.scanned < REMINDER_SCAN_BATCH) break;
   }
 
+  stockSnapshots = await collectWatchedStockIntradaySnapshots();
+
   return res.json({
     ok: true,
     scanned,
     sent,
     retried,
     failed,
+    stockSnapshots,
   });
 });
 
@@ -3518,6 +4140,9 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
               : "--";
           const marketLabel =
             result.symbol.endsWith(".TWO") ? "上櫃" : "上市";
+          const sourceNote = result.source?.includes("realtime")
+            ? "※ 資料來源：TWSE/TPEX 盤中即時快照"
+            : "※ 資料來源：Yahoo Finance（延遲報價）";
 
           const text = `📊 ${stock.name}（${stock.code}｜${marketLabel}）
 
@@ -3527,7 +4152,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 昨收：${fmtTWPrice(q.prevClose)}
 成交量：${volumeLots} 張
 
-※ 盤中延遲報價，漲跌以 Yahoo 昨收估算`;
+${sourceNote}`;
 
           await replyMessageWithFallback(event, {
             type: "text",
@@ -3718,6 +4343,39 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
   }
 
   res.status(200).end();
+});
+
+app.get("/api/stock-kline.svg", async (req, res) => {
+  const code = normalizeStockCode(String(req.query.code || ""));
+
+  if (!code || !/^[0-9A-Z]{4,6}$/.test(code)) {
+    return res.status(400).type("text/plain").send("invalid stock code");
+  }
+
+  try {
+    const stock = await findStock(`${code} 股價`);
+    if (!stock) {
+      return res.status(404).type("text/plain").send("stock not found");
+    }
+
+    const history = await getStockHistoryWithFallback(stock, "daily");
+    if (!history?.points?.length) {
+      return res.status(502).type("text/plain").send("stock history unavailable");
+    }
+
+    const svg = buildStockKLineSvg({
+      stock,
+      symbol: history.symbol,
+      points: history.points,
+    });
+
+    res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).send(svg);
+  } catch (err) {
+    console.error("stock kline svg failed:", err?.message || err);
+    res.status(500).type("text/plain").send("stock chart failed");
+  }
 });
 
 app.get("/api/update-stocks", async (req, res) => {
