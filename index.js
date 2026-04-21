@@ -2552,6 +2552,8 @@ async function getWeatherAndOutfit({
       displayLocation: locationLabel,
       timeLabel: label,
     });
+    const safeCurrent =
+      summary.currentTemp != null ? summary.currentTemp.toFixed(1) : null;
     const safeMin =
       summary.tempMin != null ? summary.tempMin.toFixed(1) : "--";
     const safeMax =
