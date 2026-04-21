@@ -2993,6 +2993,8 @@ const TWSE_BASIC_INFO_CSV_URL =
   "https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv";
 const TPEX_BASIC_INFO_CSV_URL =
   "https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv";
+const TWSE_EPS_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap14_L.csv";
+const TPEX_EPS_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap14_O.csv";
 const MIN_TWSE_STOCK_COUNT = 500;
 const MIN_TPEX_STOCK_COUNT = 300;
 const STOCK_QUOTE_TIMEOUT_MS = Number(process.env.STOCK_QUOTE_TIMEOUT_MS || 6000);
@@ -3015,7 +3017,7 @@ const STOCK_INTRADAY_MIN_POINTS = Number(
 const STOCK_INTRADAY_COLLECT_LIMIT = Number(
   process.env.STOCK_INTRADAY_COLLECT_LIMIT || 20
 );
-const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:recommend:v4:";
+const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:recommend:v5:";
 const DAILY_QUOTES_CACHE_PREFIX = "stock:dailyquotes:v2:";
 const POSTMARKET_SCAN_TTL_SECONDS = Number(
   process.env.POSTMARKET_SCAN_TTL_SECONDS || 60 * 60 * 20
@@ -3144,7 +3146,7 @@ function getCommonEtfAliases(code) {
 
 function addStockRecord(
   stocks,
-  { code, name, market = "TWSE", symbol, industry = null }
+  { code, name, market = "TWSE", symbol, industry = null, epsLtm = null }
 ) {
   const normalizedCode = normalizeStockCode(code);
   const normalizedName = String(name || "").trim();
@@ -3165,6 +3167,12 @@ function addStockRecord(
       typeof industry === "string" && industry.trim()
         ? industry.trim()
         : current.industry || null,
+    epsLtm:
+      typeof epsLtm === "number" && Number.isFinite(epsLtm)
+        ? epsLtm
+        : typeof current.epsLtm === "number" && Number.isFinite(current.epsLtm)
+        ? current.epsLtm
+        : null,
   };
   return true;
 }
@@ -3320,6 +3328,28 @@ function normalizeIndustryName(value) {
   return text;
 }
 
+function normalizeNumericText(value) {
+  return String(value || "")
+    .trim()
+    .replace(/,/g, "")
+    .replace(/^\((.*)\)$/, "-$1");
+}
+
+function normalizeEpsValue(value) {
+  const text = normalizeNumericText(value);
+  if (!text || text === "--" || text === "N/A") return null;
+  const number = Number(text);
+  return Number.isFinite(number) ? number : null;
+}
+
+function parseEpsQuarterOrder(value) {
+  const text = String(value || "").trim().toUpperCase();
+  if (!text) return null;
+  const match = text.match(/([1-4])/);
+  if (!match) return null;
+  return Number(match[1]);
+}
+
 function parseCompanyBasicInfoCsv(text, market = "TWSE") {
   const lines = String(text || "")
     .split(/\n/)
@@ -3347,6 +3377,76 @@ function parseCompanyBasicInfoCsv(text, market = "TWSE") {
   return stocks;
 }
 
+function parseCompanyEpsCsv(text, market = "TWSE") {
+  const lines = String(text || "")
+    .split(/\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) return {};
+
+  const header = parseCsvLine(lines[0]);
+  const codeIndex = header.findIndex((c) => c.includes("公司代號"));
+  const nameIndex = header.findIndex((c) => c.includes("公司名稱"));
+  const yearIndex = header.findIndex((c) => c.includes("年度"));
+  const quarterIndex = header.findIndex((c) => c.includes("季別"));
+  const epsIndex = header.findIndex((c) => c.includes("基本每股盈餘"));
+  if (
+    codeIndex < 0 ||
+    nameIndex < 0 ||
+    yearIndex < 0 ||
+    quarterIndex < 0 ||
+    epsIndex < 0
+  ) {
+    return {};
+  }
+
+  const quarterlyMap = new Map();
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCsvLine(lines[i]);
+    const code = normalizeStockCode(cols[codeIndex]);
+    const name = String(cols[nameIndex] || "").trim();
+    const year = Number(normalizeNumericText(cols[yearIndex]));
+    const quarter = parseEpsQuarterOrder(cols[quarterIndex]);
+    const eps = normalizeEpsValue(cols[epsIndex]);
+    if (!code || !name || !Number.isFinite(year) || !quarter || eps == null) {
+      continue;
+    }
+
+    const key = `${code}:${year}:${quarter}`;
+    if (!quarterlyMap.has(key)) {
+      quarterlyMap.set(key, { code, name, market, year, quarter, eps });
+    }
+  }
+
+  const grouped = new Map();
+  for (const row of quarterlyMap.values()) {
+    const list = grouped.get(row.code) || [];
+    list.push(row);
+    grouped.set(row.code, list);
+  }
+
+  const stocks = {};
+  for (const [code, rows] of grouped.entries()) {
+    rows.sort((a, b) => {
+      if (b.year !== a.year) return b.year - a.year;
+      return b.quarter - a.quarter;
+    });
+    if (rows.length < 4) continue;
+    const epsLtm = rows
+      .slice(0, 4)
+      .reduce((sum, row) => sum + (Number.isFinite(row.eps) ? row.eps : 0), 0);
+    addStockRecord(stocks, {
+      code,
+      name: rows[0].name,
+      market,
+      epsLtm: Number(epsLtm.toFixed(2)),
+    });
+  }
+
+  return stocks;
+}
+
 async function fetchStockIndustryCsv(url, market, sourceLabel) {
   const res = await fetch(url, {
     headers: {
@@ -3366,6 +3466,28 @@ async function fetchStockIndustryCsv(url, market, sourceLabel) {
     contentType,
     head120: text.slice(0, 120),
     stocks: parseCompanyBasicInfoCsv(text, market),
+  };
+}
+
+async function fetchStockEpsCsv(url, market, sourceLabel) {
+  const res = await fetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "text/csv,*/*;q=0.8",
+    },
+  });
+  const contentType = res.headers.get("content-type") || "";
+  const text = await res.text();
+  const looksLikeHTML = /<html|<!doctype html|頁面無法執行/i.test(text);
+
+  if (!res.ok || looksLikeHTML) {
+    throw new Error(`${sourceLabel} unavailable: ${res.status}`);
+  }
+
+  return {
+    contentType,
+    head120: text.slice(0, 120),
+    stocks: parseCompanyEpsCsv(text, market),
   };
 }
 
@@ -3761,6 +3883,10 @@ function buildPostMarketTags(metrics) {
     tags.push("續強");
   }
 
+  if (metrics.isFundamentallyWeak) {
+    tags.push("基本面偏弱");
+  }
+
   if (metrics.liquidityPass && metrics.volumeRatio >= 1.2) {
     tags.push("量能健康");
   }
@@ -3824,6 +3950,14 @@ function buildPostMarketStockStyleComment(metrics) {
 }
 
 function buildPostMarketPickComment(metrics) {
+  if (metrics.isFundamentallyWeak && metrics.isOverheated) {
+    return "近四季獲利偏弱，且短線已過熱，不列入主推薦。";
+  }
+  if (metrics.isFundamentallyWeak) {
+    return `${buildPostMarketStructureComment(
+      metrics
+    )}，但近四季獲利偏弱，先列高風險觀察。`;
+  }
   if (metrics.isOverheated && metrics.isWeakLiquidity) {
     return "短線已過熱，且流動性不足，不列入主推薦";
   }
@@ -3874,6 +4008,10 @@ function normalizePostMarketPick(pick) {
     typeof pick.avgVol20 === "number" && Number.isFinite(pick.avgVol20)
       ? pick.avgVol20
       : 0;
+  const epsLtm =
+    typeof pick.epsLtm === "number" && Number.isFinite(pick.epsLtm)
+      ? pick.epsLtm
+      : null;
   const consecutiveUpDays =
     typeof pick.consecutiveUpDays === "number" &&
     Number.isFinite(pick.consecutiveUpDays)
@@ -3894,6 +4032,10 @@ function normalizePostMarketPick(pick) {
         consecutiveUpDays >= 6 ||
         (typeof bias5 === "number" && bias5 > 0.06) ||
         (typeof bias20 === "number" && bias20 > 0.12);
+  const isFundamentallyWeak =
+    typeof pick.isFundamentallyWeak === "boolean"
+      ? pick.isFundamentallyWeak
+      : typeof epsLtm === "number" && epsLtm <= 0;
   const normalizedLegacyRiskLevel =
     pick.riskLevel === "低風險"
       ? "型態剛轉強"
@@ -3932,6 +4074,7 @@ function normalizePostMarketPick(pick) {
   return {
     ...pick,
     industry: normalizeIndustryName(pick.industry),
+    epsLtm,
     bias5,
     bias20,
     tradeValue,
@@ -3940,6 +4083,7 @@ function normalizePostMarketPick(pick) {
     liquidityPass,
     isWeakLiquidity,
     isOverheated,
+    isFundamentallyWeak,
     riskLevel,
     tags,
     comment:
@@ -3954,6 +4098,7 @@ function normalizePostMarketPick(pick) {
         liquidityPass,
         isWeakLiquidity,
         isOverheated,
+        isFundamentallyWeak,
         riskLevel,
       }),
   };
@@ -4135,7 +4280,7 @@ function formatPostMarketPicksText(payload) {
 
   lines.push("");
   lines.push(
-    "條件：5~40元、5MA>20MA、站上20MA、5/20日漲幅為正、量能放大、排除ETF；主推薦另加流動性與過熱過濾"
+    "條件：5~40元、5MA>20MA、站上20MA、5/20日漲幅為正、量能放大、排除ETF；主推薦另加流動性、過熱與EPS紅燈過濾"
   );
   return lines.join("\n");
 }
@@ -4189,6 +4334,10 @@ async function computePostMarketPicks() {
       Number.isFinite(latestQuote.tradeValue)
         ? latestQuote.tradeValue
         : 0;
+    const epsLtm =
+      typeof stock?.epsLtm === "number" && Number.isFinite(stock.epsLtm)
+        ? stock.epsLtm
+        : null;
 
     if (
       [close, ma5, ma20, change5d, change20d, avgVol5, avgVol20].some(
@@ -4209,6 +4358,8 @@ async function computePostMarketPicks() {
       consecutiveUpDays >= 6 ||
       bias5 > 0.06 ||
       bias20 > 0.12;
+    const isFundamentallyWeak =
+      typeof epsLtm === "number" && Number.isFinite(epsLtm) && epsLtm <= 0;
 
     if (close < 5 || close > 40) continue;
     if (!(ma5 > ma20)) continue;
@@ -4247,6 +4398,7 @@ async function computePostMarketPicks() {
       liquidityPass,
       isWeakLiquidity,
       isOverheated,
+      isFundamentallyWeak,
       riskLevel,
     };
     const candidate = {
@@ -4254,6 +4406,7 @@ async function computePostMarketPicks() {
       name: stock.name,
       market: stock.market,
       industry: stock.industry || null,
+      epsLtm,
       close,
       ma5,
       ma20,
@@ -4269,18 +4422,22 @@ async function computePostMarketPicks() {
       liquidityPass,
       isWeakLiquidity,
       isOverheated,
+      isFundamentallyWeak,
       riskLevel,
       tags: buildPostMarketTags(metrics),
       comment: buildPostMarketPickComment(metrics),
       ...score,
     };
 
-    if (liquidityPass && !isOverheated) {
+    if (liquidityPass && !isOverheated && !isFundamentallyWeak) {
       recommendedCandidates.push(candidate);
     } else {
       highRiskCandidates.push({
         ...candidate,
-        riskLevel: "高追價風險",
+        riskLevel:
+          isFundamentallyWeak && !isOverheated
+            ? "高追價風險"
+            : "高追價風險",
       });
     }
   }
@@ -6565,6 +6722,8 @@ app.get("/api/update-stocks", async (req, res) => {
   let tpexCount = 0;
   let twseIndustryCount = 0;
   let tpexIndustryCount = 0;
+  let twseEpsCount = 0;
+  let tpexEpsCount = 0;
 
   try {
     const r = await fetch(TWSE_STOCKS_OPENAPI_URL, {
@@ -6743,9 +6902,66 @@ app.get("/api/update-stocks", async (req, res) => {
     });
   }
 
+  try {
+    const result = await fetchStockEpsCsv(TWSE_EPS_CSV_URL, "TWSE", "twse-eps");
+    twseEpsCount = Object.keys(result.stocks).length;
+    debug.push({
+      source: "twse-eps",
+      status: 200,
+      contentType: result.contentType,
+      count: twseEpsCount,
+      head120: result.head120,
+    });
+    Object.entries(result.stocks).forEach(([code, info]) => {
+      if (stocks[code]) {
+        stocks[code].epsLtm =
+          typeof info.epsLtm === "number" && Number.isFinite(info.epsLtm)
+            ? info.epsLtm
+            : stocks[code].epsLtm ?? null;
+      }
+    });
+    source = source ? `${source}+twse-eps` : "twse-eps";
+  } catch (err) {
+    console.warn("TWSE EPS update failed:", err?.message || err);
+    debug.push({
+      source: "twse-eps",
+      error: String(err?.message || err),
+    });
+  }
+
+  try {
+    const result = await fetchStockEpsCsv(TPEX_EPS_CSV_URL, "TPEX", "tpex-eps");
+    tpexEpsCount = Object.keys(result.stocks).length;
+    debug.push({
+      source: "tpex-eps",
+      status: 200,
+      contentType: result.contentType,
+      count: tpexEpsCount,
+      head120: result.head120,
+    });
+    Object.entries(result.stocks).forEach(([code, info]) => {
+      if (stocks[code]) {
+        stocks[code].epsLtm =
+          typeof info.epsLtm === "number" && Number.isFinite(info.epsLtm)
+            ? info.epsLtm
+            : stocks[code].epsLtm ?? null;
+      }
+    });
+    source = source ? `${source}+tpex-eps` : "tpex-eps";
+  } catch (err) {
+    console.warn("TPEX EPS update failed:", err?.message || err);
+    debug.push({
+      source: "tpex-eps",
+      error: String(err?.message || err),
+    });
+  }
+
   const count = Object.keys(stocks).length;
   const sampleParsed = Object.values(stocks).slice(0, 5);
   const industryCount = Object.values(stocks).filter((item) => item?.industry).length;
+  const epsCount = Object.values(stocks).filter((item) =>
+    typeof item?.epsLtm === "number" && Number.isFinite(item.epsLtm)
+  ).length;
 
   if (twseCount < MIN_TWSE_STOCK_COUNT) {
     return res.status(502).json({
@@ -6756,6 +6972,8 @@ app.get("/api/update-stocks", async (req, res) => {
       tpexCount,
       twseIndustryCount,
       tpexIndustryCount,
+      twseEpsCount,
+      tpexEpsCount,
       minCount: MIN_TWSE_STOCK_COUNT,
       debug,
     });
@@ -6769,6 +6987,7 @@ app.get("/api/update-stocks", async (req, res) => {
       count,
       source,
       industryCount,
+      epsCount,
       sampleParsed,
       debug,
     });
@@ -6782,7 +7001,10 @@ app.get("/api/update-stocks", async (req, res) => {
     tpexCount,
     twseIndustryCount,
     tpexIndustryCount,
+    twseEpsCount,
+    tpexEpsCount,
     industryCount,
+    epsCount,
     debug: {
       sampleParsed,
       sources: debug,
