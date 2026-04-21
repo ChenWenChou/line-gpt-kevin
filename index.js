@@ -489,6 +489,7 @@ const GLOBAL_WEATHER_LOCATIONS = [
 const WEATHER_CONTEXT_TTL_SECONDS = Number(
   process.env.WEATHER_CONTEXT_TTL_SECONDS || 60 * 60 * 24
 );
+const CWA_API_KEY = String(process.env.CWA_API_KEY || "").trim();
 const CHAT_HISTORY_ROUNDS = Number(process.env.CHAT_HISTORY_ROUNDS || 6);
 const CHAT_HISTORY_TTL_SECONDS = Number(
   process.env.CHAT_HISTORY_TTL_SECONDS || 45 * 60
@@ -1447,7 +1448,13 @@ function buildWeatherDecision(summary, request) {
   else tempTone = "偏冷";
 
   const rainPhrase =
-    pop >= 50
+    request?.timeIntent === "now"
+      ? pop >= 50
+        ? "短時間內有明顯降雨機會"
+        : pop >= 30
+        ? "短時間內有局部降雨機會"
+        : "目前降雨機率不高"
+      : pop >= 50
       ? "有明顯下雨機會"
       : pop >= 30
       ? "有短暫雨機會"
@@ -1481,9 +1488,14 @@ function formatWeatherReplyV2(request, summary, decision, meta = {}) {
   const locationLabel = meta.displayLocation || request?.locationText || "這裡";
   const timeLabel =
     meta.timeLabel || WEATHER_TIME_LABEL[request?.timeIntent] || "今天";
+  const isCurrent = meta.mode === "current" || request?.timeIntent === "now";
+  const currentTemp =
+    Number.isFinite(meta.currentTemp) ? meta.currentTemp : summary?.currentTemp;
   const tempRange =
     Number.isFinite(summary?.tempMin) && Number.isFinite(summary?.tempMax)
-      ? `${summary.tempMin.toFixed(1)}~${summary.tempMax.toFixed(1)}°C`
+      ? isCurrent && Number.isFinite(currentTemp)
+        ? `${currentTemp.toFixed(1)}°C`
+        : `${summary.tempMin.toFixed(1)}~${summary.tempMax.toFixed(1)}°C`
       : "資料不足";
   const popText = Number.isFinite(summary?.maxPop) ? `${summary.maxPop}%` : "—";
 
@@ -1516,8 +1528,10 @@ function formatWeatherReplyV2(request, summary, decision, meta = {}) {
   return [
     `${locationLabel}${timeLabel}${decision.summaryLine}`,
     "",
-    `氣溫：約 ${tempRange}`,
-    `降雨機率：${popText}`,
+    isCurrent
+      ? `目前氣溫：約 ${tempRange}`
+      : `氣溫：約 ${tempRange}`,
+    isCurrent ? `短時降雨機率：${popText}` : `降雨機率：${popText}`,
     `建議：${decision.umbrellaAdvice.replace(/。$/, "")}`,
     decision.clothingAdvice,
     decision.comfortNote,
@@ -1600,6 +1614,35 @@ const TAIWAN_ISLANDS = {
   馬祖: { lat: 26.1597, lon: 119.9519, name: "馬祖" },
   馬祖列島: { lat: 26.1597, lon: 119.9519, name: "馬祖列島" },
 };
+const CWA_LOCATION_MAP = {
+  台北: "臺北市",
+  臺北: "臺北市",
+  新北: "新北市",
+  桃園: "桃園市",
+  台中: "臺中市",
+  臺中: "臺中市",
+  台南: "臺南市",
+  臺南: "臺南市",
+  高雄: "高雄市",
+  基隆: "基隆市",
+  新竹: "新竹市",
+  嘉義: "嘉義市",
+  宜蘭: "宜蘭縣",
+  花蓮: "花蓮縣",
+  台東: "臺東縣",
+  臺東: "臺東縣",
+  苗栗: "苗栗縣",
+  彰化: "彰化縣",
+  南投: "南投縣",
+  雲林: "雲林縣",
+  屏東: "屏東縣",
+  澎湖: "澎湖縣",
+  金門: "金門縣",
+  馬祖: "連江縣",
+  南竿: "連江縣",
+  北竿: "連江縣",
+  東引: "連江縣",
+};
 
 function findTaiwanIsland(raw) {
   if (!raw) return null;
@@ -1633,6 +1676,210 @@ function pickWeatherImage(desc = "", rainPercent = 0) {
   return "https://raw.githubusercontent.com/ChenWenChou/line-gpt-kevin/main/public/image/cloud.png";
 }
 
+function normalizeCwaLocationName(raw = "") {
+  const text = String(raw || "").trim();
+  if (!text) return "";
+
+  for (const [key, value] of Object.entries(CWA_LOCATION_MAP)) {
+    if (text.includes(key)) return value;
+  }
+
+  return CWA_LOCATION_MAP[text] || text;
+}
+
+function getCwaLocationVariants(raw = "") {
+  const normalized = normalizeCwaLocationName(raw);
+  const variants = new Set([normalized, String(raw || "").trim()]);
+
+  for (const [key, value] of Object.entries(CWA_LOCATION_MAP)) {
+    if (value === normalized) variants.add(key);
+  }
+
+  return [...variants].filter(Boolean);
+}
+
+function getCwaHeaders() {
+  return {
+    accept: "application/json",
+    "user-agent": "Mozilla/5.0",
+  };
+}
+
+async function fetchCwa36HourForecast(locationName) {
+  if (!CWA_API_KEY || !locationName) return null;
+
+  const url = `https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001?Authorization=${encodeURIComponent(
+    CWA_API_KEY
+  )}&format=JSON&locationName=${encodeURIComponent(locationName)}`;
+  const res = await fetch(url, { headers: getCwaHeaders() });
+  if (!res.ok) return null;
+  const json = await res.json();
+  return json;
+}
+
+function getCwaForecastElementMap(locationData) {
+  const elements = Array.isArray(locationData?.weatherElement)
+    ? locationData.weatherElement
+    : [];
+  const map = {};
+
+  for (const element of elements) {
+    const name = String(element?.elementName || "");
+    if (!name) continue;
+    map[name] = Array.isArray(element?.time) ? element.time : [];
+  }
+
+  return map;
+}
+
+function buildSummaryFromCwaForecast(locationData, timeIntent = "today") {
+  const elementMap = getCwaForecastElementMap(locationData);
+  const wxTimes = elementMap.Wx || [];
+  const popTimes = elementMap.PoP || [];
+  const minTTimes = elementMap.MinT || [];
+  const maxTTimes = elementMap.MaxT || [];
+  const ciTimes = elementMap.CI || [];
+
+  if (!wxTimes.length && !minTTimes.length && !maxTTimes.length) return null;
+
+  const selectIndices = (() => {
+    if (timeIntent === "tonight") return [1];
+    if (timeIntent === "tomorrow") return [1, 2];
+    return [0];
+  })();
+
+  const getValue = (times, index) => {
+    const item = times[index];
+    const params = Array.isArray(item?.parameter) ? item.parameter : [];
+    const value =
+      params[0]?.parameterValue ??
+      params[0]?.parameterName ??
+      item?.parameter?.parameterName ??
+      null;
+    return value;
+  };
+
+  const weatherTexts = selectIndices
+    .map((index) => getValue(wxTimes, index))
+    .filter(Boolean)
+    .map(String);
+  const pops = selectIndices
+    .map((index) => Number(getValue(popTimes, index)))
+    .filter(Number.isFinite);
+  const mins = selectIndices
+    .map((index) => Number(getValue(minTTimes, index)))
+    .filter(Number.isFinite);
+  const maxs = selectIndices
+    .map((index) => Number(getValue(maxTTimes, index)))
+    .filter(Number.isFinite);
+  const ciTexts = selectIndices
+    .map((index) => getValue(ciTimes, index))
+    .filter(Boolean)
+    .map(String);
+
+  return {
+    mode: "forecast",
+    source: "cwa",
+    tempMin: mins.length ? Math.min(...mins) : null,
+    tempMax: maxs.length ? Math.max(...maxs) : null,
+    feelsMin: mins.length ? Math.min(...mins) : null,
+    feelsMax: maxs.length ? Math.max(...maxs) : null,
+    humidityAvg: null,
+    maxPop: pops.length ? Math.max(...pops) : null,
+    weatherText: weatherTexts[0] || ciTexts[0] || "未知",
+    windSpeedAvg: null,
+    comfortText: ciTexts[0] || "",
+  };
+}
+
+async function fetchCwaCurrentObservation(locationText) {
+  if (!CWA_API_KEY || !locationText) return null;
+
+  const url = `https://opendata.cwa.gov.tw/api/v1/rest/datastore/O-A0003-001?Authorization=${encodeURIComponent(
+    CWA_API_KEY
+  )}&format=JSON`;
+  const res = await fetch(url, { headers: getCwaHeaders() });
+  if (!res.ok) return null;
+  const json = await res.json();
+  const records = json?.records || {};
+  const stations = Array.isArray(records?.Station)
+    ? records.Station
+    : Array.isArray(records?.station)
+    ? records.station
+    : Array.isArray(records?.locations?.[0]?.station)
+    ? records.locations[0].station
+    : [];
+  if (!stations.length) return null;
+
+  const variants = getCwaLocationVariants(locationText);
+  const scored = stations
+    .map((station) => {
+      const geo = station?.GeoInfo || station?.geoInfo || {};
+      const county = String(geo?.CountyName || geo?.countyName || "").trim();
+      const town = String(geo?.TownName || geo?.townName || "").trim();
+      const stationName = String(
+        station?.StationName || station?.stationName || ""
+      ).trim();
+      let score = 0;
+
+      if (variants.some((v) => county.includes(v) || v.includes(county))) score += 4;
+      if (variants.some((v) => town.includes(v) || v.includes(town))) score += 3;
+      if (variants.some((v) => stationName.includes(v) || v.includes(stationName))) {
+        score += 2;
+      }
+
+      return { station, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  const selected = scored[0]?.station || null;
+  if (!selected) return null;
+
+  const obs = selected?.WeatherElement || selected?.weatherElement || {};
+  const relativeHumidity = Number(
+    obs?.RelativeHumidity ?? obs?.HUMD ?? obs?.relativeHumidity
+  );
+  const humidity =
+    Number.isFinite(relativeHumidity) && relativeHumidity <= 1
+      ? Math.round(relativeHumidity * 100)
+      : Number.isFinite(relativeHumidity)
+      ? Math.round(relativeHumidity)
+      : null;
+  const airTemp = Number(
+    obs?.AirTemperature ?? obs?.TEMP ?? obs?.airTemperature
+  );
+  const windSpeed = Number(obs?.WindSpeed ?? obs?.WDSD ?? obs?.windSpeed);
+  const precipitation = Number(
+    obs?.Now?.Precipitation ??
+      obs?.Precipitation ??
+      obs?.RAIN ??
+      obs?.precipitation
+  );
+  const weatherText = String(
+    obs?.Weather || obs?.WeatherDescription || obs?.weather || "未知"
+  ).trim();
+
+  return {
+    mode: "current",
+    source: "cwa",
+    tempMin: Number.isFinite(airTemp) ? airTemp : null,
+    tempMax: Number.isFinite(airTemp) ? airTemp : null,
+    feelsMin: Number.isFinite(airTemp) ? airTemp : null,
+    feelsMax: Number.isFinite(airTemp) ? airTemp : null,
+    humidityAvg: humidity,
+    maxPop:
+      Number.isFinite(precipitation) && precipitation > 0
+        ? Math.min(100, Math.round(precipitation * 10))
+        : 0,
+    weatherText: weatherText || "未知",
+    windSpeedAvg: Number.isFinite(windSpeed) ? windSpeed : null,
+    currentTemp: Number.isFinite(airTemp) ? airTemp : null,
+    observationStation:
+      selected?.StationName || selected?.stationName || locationText,
+  };
+}
+
 function buildWeatherFlex({
   city,
   whenLabel,
@@ -1643,8 +1890,19 @@ function buildWeatherFlex({
   humidity,
   rainPercent,
   outfitText,
+  mode,
+  currentTemp,
+  rainLabel,
 }) {
   const imageUrl = pickWeatherImage(desc, rainPercent);
+  const temperatureText =
+    mode === "current"
+      ? `🌡 ${currentTemp ?? minTemp}°C（體感 ${feels}°C）`
+      : `🌡 ${minTemp}°C ～ ${maxTemp}°C（體感 ${feels}°C）`;
+  const rainText =
+    mode === "current"
+      ? `☔ ${rainLabel || `短時降雨機率 ${rainPercent}%`}`
+      : `☔ 降雨機率 ${rainPercent}%`;
   return {
     type: "flex",
     altText: `${city}${whenLabel}天氣`,
@@ -1687,7 +1945,7 @@ function buildWeatherFlex({
             contents: [
               {
                 type: "text",
-                text: `🌡 ${minTemp}°C ～ ${maxTemp}°C（體感 ${feels}°C）`,
+                text: temperatureText,
               },
               {
                 type: "text",
@@ -1695,7 +1953,7 @@ function buildWeatherFlex({
               },
               {
                 type: "text",
-                text: `☔ 降雨機率 ${rainPercent}%`,
+                text: rainText,
               },
             ],
           },
@@ -1838,7 +2096,7 @@ async function getWeatherAndOutfit({
   queryType,
 } = {}) {
   const apiKey = process.env.WEATHER_API_KEY;
-  if (!apiKey) {
+  if (!apiKey && !CWA_API_KEY) {
     return "後端沒有設定 WEATHER_API_KEY，請先到 Vercel 設定環境變數。";
   }
 
@@ -1862,6 +2120,10 @@ async function getWeatherAndOutfit({
     let resolvedLon = lon;
 
     const isTW = isTaiwanLocation(requestedLocation);
+    const cwaLocationName = normalizeCwaLocationName(requestedLocation);
+    const cwaSupportsIntent = ["now", "today", "tonight", "tomorrow"].includes(
+      resolvedTimeIntent
+    );
 
     // 台灣離島先用人工座標
     const island = findTaiwanIsland(requestedLocation);
@@ -1880,6 +2142,84 @@ async function getWeatherAndOutfit({
         resolvedLat = geo.lat;
         resolvedLon = geo.lon;
         resolvedCity = geo.name;
+      }
+    }
+
+    if (isTW && CWA_API_KEY && cwaSupportsIntent) {
+      const cwaSummary =
+        resolvedTimeIntent === "now"
+          ? await fetchCwaCurrentObservation(cwaLocationName)
+          : await (async () => {
+              const forecastJson = await fetchCwa36HourForecast(cwaLocationName);
+              const locationData = forecastJson?.records?.location?.[0];
+              return locationData
+                ? buildSummaryFromCwaForecast(locationData, resolvedTimeIntent)
+                : null;
+            })();
+
+      if (cwaSummary) {
+        const locationLabel = address
+          ? `${address}（座標）`
+          : cwaLocationName || resolvedCity || requestedLocation || "未命名地點";
+        const request = {
+          rawText,
+          locationText: locationLabel,
+          timeIntent: resolvedTimeIntent,
+          queryType: resolvedQueryType,
+        };
+        const decision = buildWeatherDecision(cwaSummary, request);
+        const label =
+          resolvedTimeIntent === "now"
+            ? WEATHER_TIME_LABEL.now
+            : WEATHER_TIME_LABEL[resolvedTimeIntent] || WEATHER_TIME_LABEL.today;
+        const weatherText = formatWeatherReplyV2(request, cwaSummary, decision, {
+          displayLocation: locationLabel,
+          timeLabel: label,
+          mode: cwaSummary.mode,
+          currentTemp: cwaSummary.currentTemp,
+        });
+        const safeCurrent = Number.isFinite(cwaSummary.currentTemp)
+          ? cwaSummary.currentTemp.toFixed(1)
+          : null;
+        const safeMin =
+          cwaSummary.tempMin != null ? cwaSummary.tempMin.toFixed(1) : "--";
+        const safeMax =
+          cwaSummary.tempMax != null ? cwaSummary.tempMax.toFixed(1) : "--";
+        const safeFeels =
+          cwaSummary.feelsMin != null && cwaSummary.feelsMax != null
+            ? cwaSummary.feelsMin === cwaSummary.feelsMax
+              ? cwaSummary.feelsMax.toFixed(1)
+              : `${cwaSummary.feelsMin.toFixed(1)}～${cwaSummary.feelsMax.toFixed(1)}`
+            : "--";
+        const humidity =
+          cwaSummary.humidityAvg != null ? Math.round(cwaSummary.humidityAvg) : "NA";
+        const rainPercent =
+          cwaSummary.maxPop != null ? cwaSummary.maxPop : 0;
+        const outfitText = [decision.clothingAdvice, decision.umbrellaAdvice]
+          .filter(Boolean)
+          .join("\n");
+
+        return {
+          text: weatherText,
+          preferTextOnly: resolvedQueryType !== "weather",
+          data: {
+            city: locationLabel,
+            whenLabel: label,
+            desc: cwaSummary.weatherText,
+            minTemp: safeCurrent || safeMin,
+            maxTemp: safeCurrent || safeMax,
+            feels: safeFeels,
+            humidity,
+            rainPercent,
+            outfitText,
+            mode: cwaSummary.mode,
+            currentTemp: safeCurrent,
+            rainLabel:
+              cwaSummary.mode === "current"
+                ? `短時降雨機率 ${rainPercent}%`
+                : null,
+          },
+        };
       }
     }
 
