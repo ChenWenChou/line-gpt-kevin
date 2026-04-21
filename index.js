@@ -2566,6 +2566,28 @@ function buildPostMarketPickComment(metrics) {
   return "短線續強，仍維持多頭排列";
 }
 
+function buildPostMarketHoldingStyle(metrics) {
+  if (
+    metrics.change20d >= 18 &&
+    metrics.bias20 >= 0.02 &&
+    metrics.bias20 <= 0.08 &&
+    metrics.volumeRatio <= 1.8
+  ) {
+    return "長線觀察";
+  }
+
+  if (
+    metrics.change20d >= 8 &&
+    metrics.change5d >= 3 &&
+    metrics.bias20 > 0 &&
+    metrics.bias20 <= 0.1
+  ) {
+    return "中線觀察";
+  }
+
+  return "短線觀察";
+}
+
 function formatPostMarketPicksText(dateKey, picks) {
   if (!Array.isArray(picks) || !picks.length) {
     return `📌 今日盤後選股（${dateKey}）\n目前沒有符合條件的標的。`;
@@ -2587,6 +2609,7 @@ function formatPostMarketPicksText(dateKey, picks) {
       )}｜20MA ${fmtTWPrice(pick.ma20)}`
     );
     lines.push(`短評：${pick.comment}`);
+    lines.push(`適合：${pick.holdingStyle}`);
   });
 
   lines.push("");
@@ -2677,6 +2700,12 @@ async function computePostMarketPicks() {
       volumeRatio,
       bias20,
       comment: buildPostMarketPickComment({
+        change20d,
+        volumeRatio,
+        bias20,
+      }),
+      holdingStyle: buildPostMarketHoldingStyle({
+        change5d,
         change20d,
         volumeRatio,
         bias20,
