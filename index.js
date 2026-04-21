@@ -3015,7 +3015,7 @@ const STOCK_INTRADAY_MIN_POINTS = Number(
 const STOCK_INTRADAY_COLLECT_LIMIT = Number(
   process.env.STOCK_INTRADAY_COLLECT_LIMIT || 20
 );
-const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:recommend:v3:";
+const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:recommend:v4:";
 const DAILY_QUOTES_CACHE_PREFIX = "stock:dailyquotes:v2:";
 const POSTMARKET_SCAN_TTL_SECONDS = Number(
   process.env.POSTMARKET_SCAN_TTL_SECONDS || 60 * 60 * 20
@@ -4328,7 +4328,7 @@ async function getOrBuildPostMarketPicks() {
   if (cached) {
     try {
       const parsed = JSON.parse(cached);
-      return decoratePostMarketPicksPayload({
+      const normalizedPayload = {
         ...parsed,
         recommendedPicks: Array.isArray(parsed?.recommendedPicks)
           ? parsed.recommendedPicks.map(normalizePostMarketPick)
@@ -4338,7 +4338,17 @@ async function getOrBuildPostMarketPicks() {
         highRiskPicks: Array.isArray(parsed?.highRiskPicks)
           ? parsed.highRiskPicks.map(normalizePostMarketPick)
           : [],
-      });
+      };
+      const allPicks = [
+        ...normalizedPayload.recommendedPicks,
+        ...normalizedPayload.highRiskPicks,
+      ];
+      const hasMissingIndustry = allPicks.some(
+        (pick) => !String(pick?.industry || "").trim()
+      );
+      if (!hasMissingIndustry) {
+        return decoratePostMarketPicksPayload(normalizedPayload);
+      }
     } catch {
       // ignore and rebuild
     }
