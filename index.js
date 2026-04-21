@@ -1205,21 +1205,54 @@ function parseWeatherQueryType(text = "") {
   return { queryType: "weather", matchedText: null };
 }
 
-function resolveTaiwanDistrict(text = "") {
+function resolveTaiwanDistrict(text = "", contextCountyName = "") {
   const input = String(text || "").trim();
   if (!input) return null;
+  const contextCounty = String(contextCountyName || "").trim();
 
   const keys = Object.keys(TW_DISTRICT_ALIAS_MAP).sort((a, b) => b.length - a.length);
   for (const key of keys) {
     if (!input.includes(key)) continue;
 
+    if (AMBIGUOUS_DISTRICT_ALIASES.has(key)) {
+      const candidates = AMBIGUOUS_DISTRICT_CANDIDATES[key] || [];
+      const explicitCandidate = candidates.find((candidate) =>
+        [candidate.countyName, candidate.displayName].some((hint) =>
+          hint ? input.includes(hint) : false
+        )
+      );
+      if (explicitCandidate) {
+        return {
+          input: key,
+          displayName: explicitCandidate.displayName,
+          countyName: explicitCandidate.countyName,
+          districtName: explicitCandidate.displayName,
+          cwaLocationName: explicitCandidate.countyName,
+          matchedLevel: "district",
+        };
+      }
+
+      if (contextCounty) {
+        const contextCandidate = candidates.find(
+          (candidate) => candidate.countyName === contextCounty
+        );
+        if (contextCandidate) {
+          return {
+            input: key,
+            displayName: contextCandidate.displayName,
+            countyName: contextCandidate.countyName,
+            districtName: contextCandidate.displayName,
+            cwaLocationName: contextCandidate.countyName,
+            matchedLevel: "district",
+          };
+        }
+      }
+
+      continue;
+    }
+
     const matched = TW_DISTRICT_ALIAS_MAP[key];
     if (!matched) continue;
-    if (AMBIGUOUS_DISTRICT_ALIASES.has(key)) {
-      const countyHints = [matched.countyName, matched.displayName].filter(Boolean);
-      const hasCountyHint = countyHints.some((hint) => input.includes(hint));
-      if (!hasCountyHint) continue;
-    }
     return {
       input: key,
       displayName: matched.displayName,
@@ -1233,11 +1266,11 @@ function resolveTaiwanDistrict(text = "") {
   return null;
 }
 
-function resolveTaiwanWeatherLocation(text = "") {
+function resolveTaiwanWeatherLocation(text = "", contextCountyName = "") {
   const input = String(text || "").trim();
   if (!input) return null;
 
-  const district = resolveTaiwanDistrict(input);
+  const district = resolveTaiwanDistrict(input, contextCountyName);
   if (district) return district;
 
   for (const [key, countyName] of Object.entries(CWA_LOCATION_MAP)) {
@@ -1255,9 +1288,9 @@ function resolveTaiwanWeatherLocation(text = "") {
   return null;
 }
 
-function parseWeatherLocationText(text = "") {
+function parseWeatherLocationText(text = "", contextCountyName = "") {
   const t = String(text || "").trim();
-  const taiwanLocation = resolveTaiwanWeatherLocation(t);
+  const taiwanLocation = resolveTaiwanWeatherLocation(t, contextCountyName);
   if (taiwanLocation) return taiwanLocation.displayName;
 
   const twMatch = TW_WEATHER_LOCATIONS.find((location) => t.includes(location));
@@ -1278,16 +1311,18 @@ function parseWeatherLocationText(text = "") {
   return null;
 }
 
-function parseWeatherRequest(text = "") {
+function parseWeatherRequest(text = "", options = {}) {
   const rawText = String(text || "").trim();
   if (!rawText || !looksLikeWeatherRequest(rawText)) {
     return null;
   }
+  const contextCountyName =
+    options?.contextResolvedLocation?.countyName || options?.contextCountyName || "";
 
   const { timeIntent } = parseWeatherTimeIntent(rawText);
   const { queryType } = parseWeatherQueryType(rawText);
-  const locationText = parseWeatherLocationText(rawText);
-  const resolvedLocation = resolveTaiwanWeatherLocation(rawText);
+  const locationText = parseWeatherLocationText(rawText, contextCountyName);
+  const resolvedLocation = resolveTaiwanWeatherLocation(rawText, contextCountyName);
 
   return {
     rawText,
@@ -1852,6 +1887,38 @@ const AMBIGUOUS_DISTRICT_ALIASES = new Set([
   "北區",
   "和平",
 ]);
+const AMBIGUOUS_DISTRICT_CANDIDATES = {
+  中正: [
+    { displayName: "中正區", countyName: "臺北市" },
+    { displayName: "中正區", countyName: "基隆市" },
+  ],
+  中山: [
+    { displayName: "中山區", countyName: "臺北市" },
+    { displayName: "中山區", countyName: "基隆市" },
+  ],
+  信義: [
+    { displayName: "信義區", countyName: "臺北市" },
+    { displayName: "信義區", countyName: "基隆市" },
+  ],
+  東區: [
+    { displayName: "東區", countyName: "新竹市" },
+    { displayName: "東區", countyName: "嘉義市" },
+    { displayName: "東區", countyName: "臺南市" },
+  ],
+  西區: [
+    { displayName: "西區", countyName: "嘉義市" },
+    { displayName: "西區", countyName: "臺中市" },
+  ],
+  南區: [
+    { displayName: "南區", countyName: "臺南市" },
+    { displayName: "南區", countyName: "臺中市" },
+  ],
+  北區: [
+    { displayName: "北區", countyName: "新竹市" },
+    { displayName: "北區", countyName: "臺中市" },
+    { displayName: "北區", countyName: "臺南市" },
+  ],
+};
 
 function findTaiwanIsland(raw) {
   if (!raw) return null;
@@ -1952,8 +2019,11 @@ function buildSummaryFromCwaForecast(locationData, timeIntent = "today") {
   if (!wxTimes.length && !minTTimes.length && !maxTTimes.length) return null;
 
   const selectIndices = (() => {
-    if (timeIntent === "tonight") return [1];
-    if (timeIntent === "tomorrow") return [1, 2];
+    if (timeIntent === "tonight" || timeIntent === "evening") return [1];
+    if (timeIntent === "tomorrow" || timeIntent === "tomorrow_morning")
+      return [2];
+    if (timeIntent === "tomorrow_evening") return [2];
+    if (timeIntent === "afternoon") return [0];
     return [0];
   })();
 
@@ -2391,9 +2461,17 @@ async function getWeatherAndOutfit({
     const cwaLocationName =
       resolvedTaiwanLocation?.cwaLocationName ||
       normalizeCwaLocationName(requestedLocation);
-    const cwaSupportsIntent = ["now", "today", "tonight", "tomorrow"].includes(
-      resolvedTimeIntent
-    );
+    const cwaSupportsIntent = [
+      "now",
+      "soon",
+      "today",
+      "afternoon",
+      "tonight",
+      "evening",
+      "tomorrow",
+      "tomorrow_morning",
+      "tomorrow_evening",
+    ].includes(resolvedTimeIntent);
 
     // 台灣離島先用人工座標
     const island = findTaiwanIsland(requestedLocation);
@@ -2420,7 +2498,7 @@ async function getWeatherAndOutfit({
 
     if (isTW && CWA_API_KEY && cwaSupportsIntent) {
       const cwaSummary =
-        resolvedTimeIntent === "now"
+        resolvedTimeIntent === "now" || resolvedTimeIntent === "soon"
           ? await fetchCwaCurrentObservation(
               cwaLocationName,
               resolvedTaiwanLocation
@@ -6127,10 +6205,12 @@ ${sourceNote}`;
       // ─────────────────────────────────────
       // 3️⃣ v2 weather parser（穿搭 / 帶傘 / 時段）
       // ─────────────────────────────────────
-      const directWeatherRequest = parseWeatherRequest(parsedMessage);
+      const last = await getLastWeatherContext(userId);
+      const directWeatherRequest = parseWeatherRequest(parsedMessage, {
+        contextResolvedLocation: last?.resolvedLocation,
+      });
 
       if (directWeatherRequest) {
-        const last = await getLastWeatherContext(userId);
         const resolvedLocationRaw = directWeatherRequest.locationText || last?.city;
 
         if (!resolvedLocationRaw) {
@@ -6461,6 +6541,30 @@ app.get("/api/update-stocks", async (req, res) => {
       sampleParsed,
       sources: debug,
     },
+  });
+});
+
+app.get("/api/weather-locations", (req, res) => {
+  const counties = Object.entries(CWA_LOCATION_MAP)
+    .map(([alias, countyName]) => ({ alias, countyName }))
+    .sort((a, b) => a.alias.localeCompare(b.alias, "zh-Hant"));
+  const districts = Object.entries(TW_DISTRICT_ALIAS_MAP)
+    .map(([alias, value]) => ({
+      alias,
+      displayName: value.displayName,
+      countyName: value.countyName,
+    }))
+    .sort((a, b) => a.alias.localeCompare(b.alias, "zh-Hant"));
+
+  return res.json({
+    ok: true,
+    countyCount: counties.length,
+    districtCount: districts.length,
+    ambiguousAliases: [...AMBIGUOUS_DISTRICT_ALIASES].sort((a, b) =>
+      a.localeCompare(b, "zh-Hant")
+    ),
+    counties,
+    districts,
   });
 });
 
