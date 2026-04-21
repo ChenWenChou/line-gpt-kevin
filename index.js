@@ -2001,8 +2001,8 @@ const STOCK_INTRADAY_MIN_POINTS = Number(
 const STOCK_INTRADAY_COLLECT_LIMIT = Number(
   process.env.STOCK_INTRADAY_COLLECT_LIMIT || 20
 );
-const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:picks:";
-const DAILY_QUOTES_CACHE_PREFIX = "stock:dailyquotes:";
+const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:recommend:v2:";
+const DAILY_QUOTES_CACHE_PREFIX = "stock:dailyquotes:v2:";
 const POSTMARKET_SCAN_TTL_SECONDS = Number(
   process.env.POSTMARKET_SCAN_TTL_SECONDS || 60 * 60 * 20
 );
@@ -2013,6 +2013,9 @@ const POSTMARKET_MAX_CALENDAR_LOOKBACK = Number(
   process.env.POSTMARKET_MAX_CALENDAR_LOOKBACK || 40
 );
 const POSTMARKET_REPLY_LIMIT = Number(process.env.POSTMARKET_REPLY_LIMIT || 5);
+const POSTMARKET_HIGHRISK_REPLY_LIMIT = Number(
+  process.env.POSTMARKET_HIGHRISK_REPLY_LIMIT || 3
+);
 const QUICKCHART_CREATE_URL = "https://quickchart.io/chart/create";
 const QUICKCHART_TIMEOUT_MS = Number(process.env.QUICKCHART_TIMEOUT_MS || 8000);
 
@@ -2313,6 +2316,7 @@ function parseTwseDailyQuotes(json, dateKey) {
     code: fields.findIndex((f) => f.includes("證券代號")),
     name: fields.findIndex((f) => f.includes("證券名稱")),
     volume: fields.findIndex((f) => f.includes("成交股數")),
+    value: fields.findIndex((f) => f.includes("成交金額")),
     open: fields.findIndex((f) => f.includes("開盤價")),
     high: fields.findIndex((f) => f.includes("最高價")),
     low: fields.findIndex((f) => f.includes("最低價")),
@@ -2335,6 +2339,7 @@ function parseTwseDailyQuotes(json, dateKey) {
       low: parseMarketNumber(row[idx.low]),
       close: parseMarketNumber(row[idx.close]),
       volumeLots: parseDailyQuoteVolumeToLots(row[idx.volume]),
+      tradeValue: parseMarketNumber(row[idx.value]),
     };
   }
 
@@ -2352,6 +2357,7 @@ function parseTpexDailyQuotes(json, dateKey) {
     code: fields.findIndex((f) => f.includes("代號")),
     name: fields.findIndex((f) => f.includes("名稱")),
     volume: fields.findIndex((f) => f.includes("成交股數")),
+    value: fields.findIndex((f) => f.includes("成交金額")),
     open: fields.findIndex((f) => f.includes("開盤")),
     high: fields.findIndex((f) => f.includes("最高")),
     low: fields.findIndex((f) => f.includes("最低")),
@@ -2374,6 +2380,7 @@ function parseTpexDailyQuotes(json, dateKey) {
       low: parseMarketNumber(row[idx.low]),
       close: parseMarketNumber(row[idx.close]),
       volumeLots: parseDailyQuoteVolumeToLots(row[idx.volume]),
+      tradeValue: parseMarketNumber(row[idx.value]),
     };
   }
 
@@ -2535,72 +2542,224 @@ function isEtfStock(stock) {
 }
 
 function scorePostMarketCandidate(metrics) {
-  const score5d = Math.min(30, Math.max(0, metrics.change5d * 3));
-  const score20d = Math.min(25, Math.max(0, metrics.change20d * 1.25));
-  const scoreVolume = Math.min(
-    25,
-    Math.max(0, (metrics.volumeRatio - 1.1) * 50)
-  );
+  const score5d = Math.min(25, Math.max(0, metrics.change5d * 2.5));
+  const score20d = Math.min(20, Math.max(0, metrics.change20d));
+  const scoreVolume = Math.min(20, Math.max(0, (metrics.volumeRatio - 1.1) * 40));
+  const scoreLiquidity =
+    metrics.tradeValue >= 1e8 ? 15 : metrics.avgVol20 >= 2000 ? 10 : 0;
 
   let scoreBias = 0;
-  if (metrics.bias20 >= 0.02 && metrics.bias20 <= 0.08) scoreBias = 20;
-  else if (metrics.bias20 > 0 && metrics.bias20 < 0.02) scoreBias = 10;
-  else if (metrics.bias20 > 0.08 && metrics.bias20 <= 0.12) scoreBias = 10;
+  if (metrics.bias20 >= 0.01 && metrics.bias20 <= 0.08) scoreBias += 10;
+  if (metrics.bias5 >= 0 && metrics.bias5 <= 0.03) scoreBias += 10;
 
   return {
     score5d,
     score20d,
     scoreVolume,
+    scoreLiquidity,
     scoreBias,
-    totalScore: Number((score5d + score20d + scoreVolume + scoreBias).toFixed(2)),
+    totalScore: Number(
+      (score5d + score20d + scoreVolume + scoreLiquidity + scoreBias).toFixed(2)
+    ),
   };
 }
 
-function buildPostMarketPickComment(metrics) {
-  if (metrics.volumeRatio >= 1.5 && metrics.change20d >= 10) {
-    return "量價齊揚，短中期結構偏強";
+function countConsecutiveUpDays(closes) {
+  if (!Array.isArray(closes) || closes.length < 2) return 0;
+
+  let streak = 0;
+  for (let i = closes.length - 1; i > 0; i--) {
+    if (
+      typeof closes[i] !== "number" ||
+      typeof closes[i - 1] !== "number" ||
+      !Number.isFinite(closes[i]) ||
+      !Number.isFinite(closes[i - 1])
+    ) {
+      break;
+    }
+    if (closes[i] > closes[i - 1]) streak += 1;
+    else break;
   }
-  if (metrics.bias20 >= 0.02 && metrics.bias20 <= 0.08 && metrics.volumeRatio >= 1.2) {
-    return "站穩20日線，量能溫和放大";
-  }
-  return "短線續強，仍維持多頭排列";
+  return streak;
 }
 
-function buildPostMarketHoldingStyle(metrics) {
+function buildPostMarketRiskLevel(metrics) {
+  if (metrics.isOverheated || metrics.isWeakLiquidity) {
+    return "高風險";
+  }
+
   if (
-    metrics.change20d >= 18 &&
-    metrics.bias20 >= 0.02 &&
+    metrics.change20d <= 20 &&
+    metrics.bias5 <= 0.03 &&
     metrics.bias20 <= 0.08 &&
-    metrics.volumeRatio <= 1.8
+    metrics.consecutiveUpDays <= 3 &&
+    metrics.liquidityPass
   ) {
-    return "長線觀察";
+    return "低風險";
   }
 
-  if (
-    metrics.change20d >= 8 &&
-    metrics.change5d >= 3 &&
-    metrics.bias20 > 0 &&
-    metrics.bias20 <= 0.1
-  ) {
-    return "中線觀察";
+  return "中風險";
+}
+
+function buildPostMarketTags(metrics) {
+  const tags = [];
+
+  if (metrics.change20d <= 12 && metrics.change5d >= 2 && metrics.bias20 <= 0.08) {
+    tags.push("剛轉強");
+  } else {
+    tags.push("續強");
   }
 
-  return "短線觀察";
+  if (metrics.liquidityPass && metrics.volumeRatio >= 1.2) {
+    tags.push("量能健康");
+  }
+
+  if (metrics.bias5 <= 0.03 && metrics.bias20 <= 0.08) {
+    tags.push("接近均線");
+  }
+
+  if (metrics.bias5 > 0.04 || metrics.bias20 > 0.08) {
+    tags.push("追價風險");
+  }
+
+  if (metrics.isOverheated) {
+    tags.push("過熱");
+  }
+
+  if (metrics.isWeakLiquidity) {
+    tags.push("流動性偏弱");
+  }
+
+  return [...new Set(tags)].slice(0, 3);
+}
+
+function buildPostMarketPickComment(metrics) {
+  if (metrics.isOverheated && metrics.isWeakLiquidity) {
+    return "強勢存在，但同時有過熱與流動性風險，不列主推薦";
+  }
+  if (metrics.isOverheated) {
+    return "強勢延續，但短線已偏熱，較適合列觀察不列主推薦";
+  }
+  if (metrics.isWeakLiquidity) {
+    return "型態偏強，但流動性不足，進出風險較高";
+  }
+  if (metrics.riskLevel === "低風險") {
+    return "型態剛轉強，量價結構健康，較適合列入主推薦";
+  }
+  return "趨勢延續且量能跟上，但已有追價風險";
 }
 
 function normalizePostMarketPick(pick) {
   if (!pick || typeof pick !== "object") return pick;
-  if (pick.holdingStyle) return pick;
+
+  const bias5 =
+    typeof pick.bias5 === "number" && Number.isFinite(pick.bias5)
+      ? pick.bias5
+      : typeof pick.close === "number" &&
+        typeof pick.ma5 === "number" &&
+        Number.isFinite(pick.close) &&
+        Number.isFinite(pick.ma5) &&
+        pick.ma5 > 0
+      ? (pick.close - pick.ma5) / pick.ma5
+      : null;
+  const bias20 =
+    typeof pick.bias20 === "number" && Number.isFinite(pick.bias20)
+      ? pick.bias20
+      : typeof pick.close === "number" &&
+        typeof pick.ma20 === "number" &&
+        Number.isFinite(pick.close) &&
+        Number.isFinite(pick.ma20) &&
+        pick.ma20 > 0
+      ? (pick.close - pick.ma20) / pick.ma20
+      : null;
+  const tradeValue =
+    typeof pick.tradeValue === "number" && Number.isFinite(pick.tradeValue)
+      ? pick.tradeValue
+      : 0;
+  const avgVol20 =
+    typeof pick.avgVol20 === "number" && Number.isFinite(pick.avgVol20)
+      ? pick.avgVol20
+      : 0;
+  const consecutiveUpDays =
+    typeof pick.consecutiveUpDays === "number" &&
+    Number.isFinite(pick.consecutiveUpDays)
+      ? pick.consecutiveUpDays
+      : 0;
+  const liquidityPass =
+    typeof pick.liquidityPass === "boolean"
+      ? pick.liquidityPass
+      : avgVol20 >= 2000 || tradeValue >= 1e8;
+  const isWeakLiquidity =
+    typeof pick.isWeakLiquidity === "boolean"
+      ? pick.isWeakLiquidity
+      : avgVol20 < 2000 && tradeValue < 1e8;
+  const isOverheated =
+    typeof pick.isOverheated === "boolean"
+      ? pick.isOverheated
+      : (typeof pick.change20d === "number" && pick.change20d > 35) ||
+        consecutiveUpDays >= 6 ||
+        (typeof bias5 === "number" && bias5 > 0.06) ||
+        (typeof bias20 === "number" && bias20 > 0.12);
+  const riskLevel =
+    pick.riskLevel ||
+    buildPostMarketRiskLevel({
+      ...pick,
+      bias5,
+      bias20,
+      tradeValue,
+      avgVol20,
+      consecutiveUpDays,
+      liquidityPass,
+      isWeakLiquidity,
+      isOverheated,
+    });
+  const tags = Array.isArray(pick.tags)
+    ? pick.tags
+    : buildPostMarketTags({
+        ...pick,
+        bias5,
+        bias20,
+        tradeValue,
+        avgVol20,
+        consecutiveUpDays,
+        liquidityPass,
+        isWeakLiquidity,
+        isOverheated,
+      });
 
   return {
     ...pick,
-    holdingStyle: buildPostMarketHoldingStyle({
-      change5d: pick.change5d,
-      change20d: pick.change20d,
-      volumeRatio: pick.volumeRatio,
-      bias20: pick.bias20,
-    }),
+    bias5,
+    bias20,
+    tradeValue,
+    avgVol20,
+    consecutiveUpDays,
+    liquidityPass,
+    isWeakLiquidity,
+    isOverheated,
+    riskLevel,
+    tags,
+    comment:
+      pick.comment ||
+      buildPostMarketPickComment({
+        ...pick,
+        bias5,
+        bias20,
+        tradeValue,
+        avgVol20,
+        consecutiveUpDays,
+        liquidityPass,
+        isWeakLiquidity,
+        isOverheated,
+        riskLevel,
+      }),
   };
+}
+
+function fmtTradeValueYi(n) {
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return "--";
+  const value = n / 1e8;
+  return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)}億`;
 }
 
 async function getRecentPostMarketStreakCodes(requiredDays = 3) {
@@ -2623,9 +2782,11 @@ async function getRecentPostMarketStreakCodes(requiredDays = 3) {
 
     try {
       const parsed = JSON.parse(cached);
-      const picks = Array.isArray(parsed?.picks)
-        ? parsed.picks.map(normalizePostMarketPick)
-        : [];
+      const picks = [
+        ...(Array.isArray(parsed?.recommendedPicks) ? parsed.recommendedPicks : []),
+        ...(Array.isArray(parsed?.highRiskPicks) ? parsed.highRiskPicks : []),
+        ...(Array.isArray(parsed?.picks) ? parsed.picks : []),
+      ].map(normalizePostMarketPick);
       if (!picks.length) {
         return new Set();
       }
@@ -2657,50 +2818,97 @@ async function decoratePostMarketPicksPayload(payload) {
     return payload;
   }
 
-  const normalizedPicks = Array.isArray(payload.picks)
-    ? payload.picks.map(normalizePostMarketPick)
-    : [];
   const streakCodes = await getRecentPostMarketStreakCodes(3);
+  const decorateList = (list) =>
+    (Array.isArray(list) ? list : []).map((pick) => ({
+      ...normalizePostMarketPick(pick),
+      streak3d: streakCodes.has(pick?.code),
+    }));
 
   return {
     ...payload,
-    picks: normalizedPicks.map((pick) => ({
-      ...pick,
-      streak3d: streakCodes.has(pick.code),
-    })),
+    recommendedPicks: decorateList(
+      payload.recommendedPicks || payload.picks || []
+    ),
+    highRiskPicks: decorateList(payload.highRiskPicks || []),
   };
 }
 
-function formatPostMarketPicksText(dateKey, picks) {
-  if (!Array.isArray(picks) || !picks.length) {
-    return `📌 今日盤後選股（${dateKey}）\n目前沒有符合條件的標的。`;
+function formatPostMarketPicksText(payload) {
+  const dateKey = payload?.dateKey || "--";
+  const recommendedPicks = Array.isArray(payload?.recommendedPicks)
+    ? payload.recommendedPicks.map(normalizePostMarketPick)
+    : [];
+  const highRiskPicks = Array.isArray(payload?.highRiskPicks)
+    ? payload.highRiskPicks.map(normalizePostMarketPick)
+    : [];
+
+  const lines = [
+    `📌 今日盤後推薦股（${dateKey}）`,
+    "依趨勢、量能、流動性與風險過濾",
+    "",
+    "【推薦名單】",
+  ];
+
+  if (!recommendedPicks.length) {
+    lines.push("目前沒有符合主推薦條件的標的。");
+  } else {
+    recommendedPicks.forEach((pick, index) => {
+      lines.push("");
+      lines.push(
+        `${index + 1}. ${pick.code} ${pick.name}${
+          pick.streak3d ? "【3日中選】" : ""
+        }`
+      );
+      lines.push(`風險：${pick.riskLevel}`);
+      lines.push(`標籤：${(pick.tags || []).join("、") || "—"}`);
+      lines.push(
+        `收盤 ${fmtTWPrice(pick.close)}｜5日 ${pick.change5d.toFixed(
+          1
+        )}%｜20日 ${pick.change20d.toFixed(1)}%`
+      );
+      lines.push(
+        `量比 ${pick.volumeRatio.toFixed(2)}｜20日均量 ${Math.round(
+          pick.avgVol20
+        ).toLocaleString("zh-TW")}張｜成交額 ${fmtTradeValueYi(pick.tradeValue)}`
+      );
+      lines.push(`短評：${pick.comment}`);
+    });
   }
 
-  const lines = [`📌 今日盤後選股（${dateKey}）`];
+  lines.push("");
+  lines.push("【高風險強勢股】");
 
-  picks.map(normalizePostMarketPick).forEach((pick, index) => {
-    lines.push("");
-    lines.push(
-      `${index + 1}. ${pick.code} ${pick.name}${
-        pick.streak3d ? "【3日中選】" : ""
-      }`
-    );
-    lines.push(
-      `收盤 ${fmtTWPrice(pick.close)}｜5日 ${pick.change5d.toFixed(
-        1
-      )}%｜20日 ${pick.change20d.toFixed(1)}%`
-    );
-    lines.push(
-      `量比 ${pick.volumeRatio.toFixed(2)}｜5MA ${fmtTWPrice(
-        pick.ma5
-      )}｜20MA ${fmtTWPrice(pick.ma20)}`
-    );
-    lines.push(`短評：${pick.comment}`);
-    lines.push(`適合：${pick.holdingStyle}`);
-  });
+  if (!highRiskPicks.length) {
+    lines.push("目前沒有符合高風險強勢條件的標的。");
+  } else {
+    highRiskPicks.forEach((pick, index) => {
+      lines.push("");
+      lines.push(
+        `${index + 1}. ${pick.code} ${pick.name}${
+          pick.streak3d ? "【3日中選】" : ""
+        }`
+      );
+      lines.push(`風險：${pick.riskLevel}`);
+      lines.push(`標籤：${(pick.tags || []).join("、") || "—"}`);
+      lines.push(
+        `收盤 ${fmtTWPrice(pick.close)}｜5日 ${pick.change5d.toFixed(
+          1
+        )}%｜20日 ${pick.change20d.toFixed(1)}%`
+      );
+      lines.push(
+        `量比 ${pick.volumeRatio.toFixed(2)}｜20日均量 ${Math.round(
+          pick.avgVol20
+        ).toLocaleString("zh-TW")}張｜成交額 ${fmtTradeValueYi(pick.tradeValue)}`
+      );
+      lines.push(`短評：${pick.comment}`);
+    });
+  }
 
   lines.push("");
-  lines.push("條件：5~40元、5MA>20MA、站上20MA、5/20日漲幅為正、量能放大、排除ETF");
+  lines.push(
+    "條件：5~40元、5MA>20MA、站上20MA、5/20日漲幅為正、量能放大、排除ETF；主推薦另加流動性與過熱過濾"
+  );
   return lines.join("\n");
 }
 
@@ -2721,7 +2929,8 @@ async function computePostMarketPicks() {
   const newestToOldest = snapshots;
   const latestDateKey = newestToOldest[0].dateKey;
   const orderedSnapshots = [...newestToOldest].reverse();
-  const candidates = [];
+  const recommendedCandidates = [];
+  const highRiskCandidates = [];
 
   for (const stock of Object.values(stocks)) {
     if (!stock || isEtfStock(stock)) continue;
@@ -2739,6 +2948,7 @@ async function computePostMarketPicks() {
 
     const closes = series.map((quote) => quote.close);
     const volumes = series.map((quote) => quote.volumeLots);
+    const latestQuote = series[series.length - 1];
     const close = closes[closes.length - 1];
     const ma5 = calcMovingAverage(closes, 5);
     const ma20 = calcMovingAverage(closes, 20);
@@ -2746,6 +2956,11 @@ async function computePostMarketPicks() {
     const change20d = calcPercentChange(close, closes[closes.length - 21]);
     const avgVol5 = calcAverage(volumes.slice(volumes.length - 5));
     const avgVol20 = calcAverage(volumes.slice(volumes.length - 20));
+    const tradeValue =
+      typeof latestQuote?.tradeValue === "number" &&
+      Number.isFinite(latestQuote.tradeValue)
+        ? latestQuote.tradeValue
+        : 0;
 
     if (
       [close, ma5, ma20, change5d, change20d, avgVol5, avgVol20].some(
@@ -2756,7 +2971,16 @@ async function computePostMarketPicks() {
     }
 
     const volumeRatio = avgVol20 > 0 ? avgVol5 / avgVol20 : 0;
+    const bias5 = ma5 > 0 ? (close - ma5) / ma5 : -1;
     const bias20 = ma20 > 0 ? (close - ma20) / ma20 : -1;
+    const consecutiveUpDays = countConsecutiveUpDays(closes);
+    const liquidityPass = avgVol20 >= 2000 || tradeValue >= 1e8;
+    const isWeakLiquidity = avgVol20 < 2000 && tradeValue < 1e8;
+    const isOverheated =
+      change20d > 35 ||
+      consecutiveUpDays >= 6 ||
+      bias5 > 0.06 ||
+      bias20 > 0.12;
 
     if (close < 5 || close > 40) continue;
     if (!(ma5 > ma20)) continue;
@@ -2764,16 +2988,40 @@ async function computePostMarketPicks() {
     if (!(change5d > 0)) continue;
     if (!(change20d > 0)) continue;
     if (!(avgVol5 >= avgVol20 * 1.1)) continue;
-    if (!(avgVol20 >= 1000)) continue;
 
     const score = scorePostMarketCandidate({
       change5d,
       change20d,
       volumeRatio,
+      avgVol20,
+      tradeValue,
+      bias5,
       bias20,
     });
-
-    candidates.push({
+    const riskLevel = buildPostMarketRiskLevel({
+      change20d,
+      bias5,
+      bias20,
+      consecutiveUpDays,
+      liquidityPass,
+      isWeakLiquidity,
+      isOverheated,
+    });
+    const metrics = {
+      change5d,
+      change20d,
+      volumeRatio,
+      avgVol20,
+      tradeValue,
+      bias5,
+      bias20,
+      consecutiveUpDays,
+      liquidityPass,
+      isWeakLiquidity,
+      isOverheated,
+      riskLevel,
+    };
+    const candidate = {
       code: stock.code,
       name: stock.name,
       market: stock.market,
@@ -2784,41 +3032,69 @@ async function computePostMarketPicks() {
       change20d,
       avgVol5,
       avgVol20,
+      tradeValue,
       volumeRatio,
+      bias5,
       bias20,
-      comment: buildPostMarketPickComment({
-        change20d,
-        volumeRatio,
-        bias20,
-      }),
-      holdingStyle: buildPostMarketHoldingStyle({
-        change5d,
-        change20d,
-        volumeRatio,
-        bias20,
-      }),
+      consecutiveUpDays,
+      liquidityPass,
+      isWeakLiquidity,
+      isOverheated,
+      riskLevel,
+      tags: buildPostMarketTags(metrics),
+      comment: buildPostMarketPickComment(metrics),
       ...score,
-    });
+    };
+
+    if (liquidityPass && !isOverheated) {
+      recommendedCandidates.push(candidate);
+    } else {
+      highRiskCandidates.push({
+        ...candidate,
+        riskLevel: "高風險",
+      });
+    }
   }
 
-  candidates.sort((a, b) => {
+  recommendedCandidates.sort((a, b) => {
+    const riskRank = { "低風險": 0, "中風險": 1 };
+    const aRisk = riskRank[a.riskLevel] ?? 9;
+    const bRisk = riskRank[b.riskLevel] ?? 9;
+    if (aRisk !== bRisk) return aRisk - bRisk;
     if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
     if (b.volumeRatio !== a.volumeRatio) return b.volumeRatio - a.volumeRatio;
-    if (b.change20d !== a.change20d) return b.change20d - a.change20d;
     return Math.abs(a.bias20 - 0.05) - Math.abs(b.bias20 - 0.05);
   });
 
-  const picks = candidates.slice(
+  highRiskCandidates.sort((a, b) => {
+    if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+    if (b.change20d !== a.change20d) return b.change20d - a.change20d;
+    if (b.consecutiveUpDays !== a.consecutiveUpDays) {
+      return b.consecutiveUpDays - a.consecutiveUpDays;
+    }
+    if (b.volumeRatio !== a.volumeRatio) return b.volumeRatio - a.volumeRatio;
+    return (b.tradeValue || 0) - (a.tradeValue || 0);
+  });
+
+  const recommendedPicks = recommendedCandidates.slice(
     0,
     Number.isFinite(POSTMARKET_REPLY_LIMIT) && POSTMARKET_REPLY_LIMIT > 0
       ? POSTMARKET_REPLY_LIMIT
       : 5
   );
+  const highRiskPicks = highRiskCandidates.slice(
+    0,
+    Number.isFinite(POSTMARKET_HIGHRISK_REPLY_LIMIT) &&
+      POSTMARKET_HIGHRISK_REPLY_LIMIT > 0
+      ? POSTMARKET_HIGHRISK_REPLY_LIMIT
+      : 3
+  );
   const payload = {
     dateKey: latestDateKey,
     generatedAt: new Date().toISOString(),
-    totalCandidates: candidates.length,
-    picks,
+    totalCandidates: recommendedCandidates.length + highRiskCandidates.length,
+    recommendedPicks,
+    highRiskPicks,
   };
 
   await redisSet(
@@ -2846,8 +3122,13 @@ async function getOrBuildPostMarketPicks() {
       const parsed = JSON.parse(cached);
       return decoratePostMarketPicksPayload({
         ...parsed,
-        picks: Array.isArray(parsed?.picks)
+        recommendedPicks: Array.isArray(parsed?.recommendedPicks)
+          ? parsed.recommendedPicks.map(normalizePostMarketPick)
+          : Array.isArray(parsed?.picks)
           ? parsed.picks.map(normalizePostMarketPick)
+          : [],
+        highRiskPicks: Array.isArray(parsed?.highRiskPicks)
+          ? parsed.highRiskPicks.map(normalizePostMarketPick)
           : [],
       });
     } catch {
@@ -4666,20 +4947,20 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       }
 
       // ─────────────────────────────────────
-      // 📌 今日盤後選股
+      // 📌 今日盤後推薦股
       // ─────────────────────────────────────
-      if (/今日盤後選股/.test(parsedMessage)) {
+      if (/今日盤後推薦股|今日盤後選股/.test(parsedMessage)) {
         try {
           const payload = await getOrBuildPostMarketPicks();
           await replyMessageWithFallback(event, {
             type: "text",
-            text: formatPostMarketPicksText(payload.dateKey, payload.picks),
+            text: formatPostMarketPicksText(payload),
           });
         } catch (err) {
           console.error("postmarket picks failed:", err?.message || err);
           await replyMessageWithFallback(event, {
             type: "text",
-            text: "今日盤後選股暫時產生失敗，請晚點再試。",
+            text: "今日盤後推薦股暫時產生失敗，請晚點再試。",
           });
         }
         continue;
