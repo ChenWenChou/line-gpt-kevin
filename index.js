@@ -3011,7 +3011,7 @@ const STOCK_INTRADAY_MIN_POINTS = Number(
 const STOCK_INTRADAY_COLLECT_LIMIT = Number(
   process.env.STOCK_INTRADAY_COLLECT_LIMIT || 20
 );
-const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:recommend:v2:";
+const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:recommend:v3:";
 const DAILY_QUOTES_CACHE_PREFIX = "stock:dailyquotes:v2:";
 const POSTMARKET_SCAN_TTL_SECONDS = Number(
   process.env.POSTMARKET_SCAN_TTL_SECONDS || 60 * 60 * 20
@@ -3595,7 +3595,7 @@ function countConsecutiveUpDays(closes) {
 
 function buildPostMarketRiskLevel(metrics) {
   if (metrics.isOverheated || metrics.isWeakLiquidity) {
-    return "高風險";
+    return "高追價風險";
   }
 
   if (
@@ -3605,10 +3605,10 @@ function buildPostMarketRiskLevel(metrics) {
     metrics.consecutiveUpDays <= 3 &&
     metrics.liquidityPass
   ) {
-    return "低風險";
+    return "型態剛轉強";
   }
 
-  return "中風險";
+  return "相對低追價風險";
 }
 
 function buildPostMarketTags(metrics) {
@@ -3643,20 +3643,63 @@ function buildPostMarketTags(metrics) {
   return [...new Set(tags)].slice(0, 3);
 }
 
+function buildPostMarketLiquidityComment(metrics) {
+  if (metrics.tradeValue >= 5e8) {
+    return "成交額大、流動性佳";
+  }
+  if (metrics.tradeValue >= 2e8) {
+    return "量能充足、進出相對順";
+  }
+  if (metrics.tradeValue >= 1e8) {
+    return "成交額達標，流動性還算夠";
+  }
+  return "量能雖放大，但流動性仍偏一般";
+}
+
+function buildPostMarketStructureComment(metrics) {
+  if (metrics.isOverheated) {
+    return "已明顯偏離短中期均線";
+  }
+  if (metrics.change20d <= 12 && metrics.bias20 <= 0.08) {
+    return "剛站回中期均線，偏向轉強初段";
+  }
+  if (metrics.bias5 <= 0.03 && metrics.bias20 <= 0.08) {
+    return "沿均線上行，型態仍算整齊";
+  }
+  return "趨勢延續，但已經漲了一段";
+}
+
+function buildPostMarketStockStyleComment(metrics) {
+  if (metrics.close < 20 && metrics.tradeValue >= 2e8) {
+    return "低價高量，容易吸引短線資金";
+  }
+  if (metrics.tradeValue >= 5e8) {
+    return "較偏主流量能股，走勢通常相對穩一些";
+  }
+  if (metrics.tradeValue >= 1e8) {
+    return "中型股彈性仍在，但波動會比大型股明顯";
+  }
+  return "股性偏活，進出節奏要抓得更緊";
+}
+
 function buildPostMarketPickComment(metrics) {
   if (metrics.isOverheated && metrics.isWeakLiquidity) {
-    return "強勢存在，但同時有過熱與流動性風險，不列主推薦";
+    return "短線已過熱，且流動性不足，不列入主推薦";
   }
   if (metrics.isOverheated) {
-    return "強勢延續，但短線已偏熱，較適合列觀察不列主推薦";
+    return `${buildPostMarketStructureComment(metrics)}，追價壓力偏高，先列觀察。`;
   }
   if (metrics.isWeakLiquidity) {
-    return "型態偏強，但流動性不足，進出風險較高";
+    return `${buildPostMarketStructureComment(metrics)}，但流動性偏弱，進出風險較高。`;
   }
-  if (metrics.riskLevel === "低風險") {
-    return "型態剛轉強，量價結構健康，較適合列入主推薦";
+  if (metrics.riskLevel === "型態剛轉強") {
+    return `${buildPostMarketStructureComment(metrics)}，${buildPostMarketLiquidityComment(
+      metrics
+    )}，較適合優先觀察。`;
   }
-  return "趨勢延續且量能跟上，但已有追價風險";
+  return `${buildPostMarketLiquidityComment(metrics)}，${buildPostMarketStockStyleComment(
+    metrics
+  )}。`;
 }
 
 function normalizePostMarketPick(pick) {
@@ -3710,8 +3753,16 @@ function normalizePostMarketPick(pick) {
         consecutiveUpDays >= 6 ||
         (typeof bias5 === "number" && bias5 > 0.06) ||
         (typeof bias20 === "number" && bias20 > 0.12);
+  const normalizedLegacyRiskLevel =
+    pick.riskLevel === "低風險"
+      ? "型態剛轉強"
+      : pick.riskLevel === "中風險"
+      ? "相對低追價風險"
+      : pick.riskLevel === "高風險"
+      ? "高追價風險"
+      : pick.riskLevel;
   const riskLevel =
-    pick.riskLevel ||
+    normalizedLegacyRiskLevel ||
     buildPostMarketRiskLevel({
       ...pick,
       bias5,
@@ -3857,7 +3908,7 @@ function formatPostMarketPicksText(payload) {
     `📌 今日盤後推薦股（${dateKey}）`,
     "依趨勢、量能、流動性與風險過濾",
     "",
-    "【推薦名單】",
+    "【主推薦】",
   ];
 
   if (!recommendedPicks.length) {
@@ -3870,7 +3921,7 @@ function formatPostMarketPicksText(payload) {
           pick.streak3d ? "【3日中選】" : ""
         }`
       );
-      lines.push(`風險：${pick.riskLevel}`);
+      lines.push(`判讀：${pick.riskLevel}`);
       lines.push(`標籤：${(pick.tags || []).join("、") || "—"}`);
       lines.push(
         `收盤 ${fmtTWPrice(pick.close)}｜5日 ${pick.change5d.toFixed(
@@ -3899,7 +3950,7 @@ function formatPostMarketPicksText(payload) {
           pick.streak3d ? "【3日中選】" : ""
         }`
       );
-      lines.push(`風險：${pick.riskLevel}`);
+      lines.push(`判讀：${pick.riskLevel}`);
       lines.push(`標籤：${(pick.tags || []).join("、") || "—"}`);
       lines.push(
         `收盤 ${fmtTWPrice(pick.close)}｜5日 ${pick.change5d.toFixed(
@@ -4061,13 +4112,13 @@ async function computePostMarketPicks() {
     } else {
       highRiskCandidates.push({
         ...candidate,
-        riskLevel: "高風險",
+        riskLevel: "高追價風險",
       });
     }
   }
 
   recommendedCandidates.sort((a, b) => {
-    const riskRank = { "低風險": 0, "中風險": 1 };
+    const riskRank = { "型態剛轉強": 0, "相對低追價風險": 1 };
     const aRisk = riskRank[a.riskLevel] ?? 9;
     const bRisk = riskRank[b.riskLevel] ?? 9;
     if (aRisk !== bRisk) return aRisk - bRisk;
