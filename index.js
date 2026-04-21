@@ -1367,6 +1367,7 @@ function buildForecastSummaryFromSlots(slots = []) {
     maxPop: pops.length ? Math.round(Math.max(...pops)) : null,
     weatherText,
     windSpeedAvg: windSpeeds.length ? calcAverage(windSpeeds) : null,
+    currentTemp: temps.length ? temps[0] : null,
   };
 }
 
@@ -1462,7 +1463,9 @@ function buildWeatherDecision(summary, request) {
   const summaryLine = `${tempTone}，${rainPhrase}。`;
 
   const comfortNote =
-    humidity !== null && humidity >= 80
+    summary?.comfortText
+      ? String(summary.comfortText).trim()
+      : humidity !== null && humidity >= 80
       ? "體感會比實際溫度再悶一些。"
       : humidity !== null && humidity <= 55
       ? "空氣相對乾爽。"
@@ -1792,6 +1795,30 @@ function buildSummaryFromCwaForecast(locationData, timeIntent = "today") {
   };
 }
 
+function estimateApparentTemperature(tempC, humidityPct, windMps = 0) {
+  if (
+    !Number.isFinite(tempC) ||
+    !Number.isFinite(humidityPct) ||
+    humidityPct < 0 ||
+    humidityPct > 100
+  ) {
+    return null;
+  }
+
+  const vaporPressure =
+    (humidityPct / 100) *
+    6.105 *
+    Math.exp((17.27 * tempC) / (237.7 + tempC));
+  const apparent = tempC + 0.33 * vaporPressure - 0.7 * (windMps || 0) - 4.0;
+
+  return Number.isFinite(apparent) ? apparent : null;
+}
+
+function shouldShowFeelsLike(tempValue, feelsValue) {
+  if (!Number.isFinite(tempValue) || !Number.isFinite(feelsValue)) return false;
+  return Math.abs(feelsValue - tempValue) >= 0.5;
+}
+
 async function fetchCwaCurrentObservation(locationText) {
   if (!CWA_API_KEY || !locationText) return null;
 
@@ -1859,14 +1886,17 @@ async function fetchCwaCurrentObservation(locationText) {
   const weatherText = String(
     obs?.Weather || obs?.WeatherDescription || obs?.weather || "未知"
   ).trim();
+  const apparentTemp = estimateApparentTemperature(airTemp, humidity, windSpeed);
+  const resolvedFeels = Number.isFinite(apparentTemp) ? apparentTemp : airTemp;
+  const showFeels = shouldShowFeelsLike(airTemp, resolvedFeels);
 
   return {
     mode: "current",
     source: "cwa",
     tempMin: Number.isFinite(airTemp) ? airTemp : null,
     tempMax: Number.isFinite(airTemp) ? airTemp : null,
-    feelsMin: Number.isFinite(airTemp) ? airTemp : null,
-    feelsMax: Number.isFinite(airTemp) ? airTemp : null,
+    feelsMin: Number.isFinite(resolvedFeels) ? resolvedFeels : null,
+    feelsMax: Number.isFinite(resolvedFeels) ? resolvedFeels : null,
     humidityAvg: humidity,
     maxPop:
       Number.isFinite(precipitation) && precipitation > 0
@@ -1875,6 +1905,7 @@ async function fetchCwaCurrentObservation(locationText) {
     weatherText: weatherText || "未知",
     windSpeedAvg: Number.isFinite(windSpeed) ? windSpeed : null,
     currentTemp: Number.isFinite(airTemp) ? airTemp : null,
+    showFeels,
     observationStation:
       selected?.StationName || selected?.stationName || locationText,
   };
@@ -1893,12 +1924,17 @@ function buildWeatherFlex({
   mode,
   currentTemp,
   rainLabel,
+  showFeels,
 }) {
   const imageUrl = pickWeatherImage(desc, rainPercent);
+  const currentValue =
+    currentTemp ?? (typeof minTemp === "string" ? minTemp : `${minTemp}`);
+  const feelsSuffix =
+    showFeels && feels && feels !== "--" ? `（體感 ${feels}°C）` : "";
   const temperatureText =
     mode === "current"
-      ? `🌡 ${currentTemp ?? minTemp}°C（體感 ${feels}°C）`
-      : `🌡 ${minTemp}°C ～ ${maxTemp}°C（體感 ${feels}°C）`;
+      ? `🌡 ${currentValue}°C${feelsSuffix}`
+      : `🌡 ${minTemp}°C ～ ${maxTemp}°C${feelsSuffix}`;
   const rainText =
     mode === "current"
       ? `☔ ${rainLabel || `短時降雨機率 ${rainPercent}%`}`
@@ -2214,6 +2250,10 @@ async function getWeatherAndOutfit({
             outfitText,
             mode: cwaSummary.mode,
             currentTemp: safeCurrent,
+            showFeels:
+              typeof cwaSummary.showFeels === "boolean"
+                ? cwaSummary.showFeels
+                : shouldShowFeelsLike(cwaSummary.currentTemp, cwaSummary.feelsMax),
             rainLabel:
               cwaSummary.mode === "current"
                 ? `短時降雨機率 ${rainPercent}%`
@@ -2284,6 +2324,15 @@ async function getWeatherAndOutfit({
     const outfitText = [decision.clothingAdvice, decision.umbrellaAdvice]
       .filter(Boolean)
       .join("\n");
+    const showFeels =
+      resolvedTimeIntent === "now"
+        ? shouldShowFeelsLike(summary.currentTemp, summary.feelsMax)
+        : Number.isFinite(summary.tempMin) &&
+          Number.isFinite(summary.tempMax) &&
+          Number.isFinite(summary.feelsMin) &&
+          Number.isFinite(summary.feelsMax) &&
+          (Math.abs(summary.feelsMin - summary.tempMin) >= 0.5 ||
+            Math.abs(summary.feelsMax - summary.tempMax) >= 0.5);
 
     return {
       text: weatherText,
@@ -2298,6 +2347,7 @@ async function getWeatherAndOutfit({
         humidity,
         rainPercent,
         outfitText,
+        showFeels,
       },
     };
   } catch (err) {
