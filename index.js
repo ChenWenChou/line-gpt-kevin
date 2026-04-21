@@ -2989,6 +2989,10 @@ const TWSE_STOCKS_CSV_URL =
   "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data";
 const TPEX_STOCKS_JSON_URL =
   "https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date=&type=EW&response=json";
+const TWSE_BASIC_INFO_CSV_URL =
+  "https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv";
+const TPEX_BASIC_INFO_CSV_URL =
+  "https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv";
 const MIN_TWSE_STOCK_COUNT = 500;
 const MIN_TPEX_STOCK_COUNT = 300;
 const STOCK_QUOTE_TIMEOUT_MS = Number(process.env.STOCK_QUOTE_TIMEOUT_MS || 6000);
@@ -3025,6 +3029,9 @@ const POSTMARKET_MAX_CALENDAR_LOOKBACK = Number(
 const POSTMARKET_REPLY_LIMIT = Number(process.env.POSTMARKET_REPLY_LIMIT || 5);
 const POSTMARKET_HIGHRISK_REPLY_LIMIT = Number(
   process.env.POSTMARKET_HIGHRISK_REPLY_LIMIT || 3
+);
+const POSTMARKET_MAX_PER_INDUSTRY = Number(
+  process.env.POSTMARKET_MAX_PER_INDUSTRY || 2
 );
 const QUICKCHART_CREATE_URL = "https://quickchart.io/chart/create";
 const QUICKCHART_TIMEOUT_MS = Number(process.env.QUICKCHART_TIMEOUT_MS || 8000);
@@ -3099,17 +3106,29 @@ function getCommonEtfAliases(code) {
   return COMMON_TW_ETF_ALIASES[code]?.aliases || [];
 }
 
-function addStockRecord(stocks, { code, name, market = "TWSE", symbol }) {
+function addStockRecord(
+  stocks,
+  { code, name, market = "TWSE", symbol, industry = null }
+) {
   const normalizedCode = normalizeStockCode(code);
   const normalizedName = String(name || "").trim();
   if (!normalizedCode || !normalizedName) return false;
 
+  const current = stocks[normalizedCode] || {};
   stocks[normalizedCode] = {
+    ...current,
     code: normalizedCode,
     name: normalizedName,
     market,
     symbol: symbol || `${normalizedCode}.${market === "TPEX" ? "TWO" : "TW"}`,
-    aliases: getCommonEtfAliases(normalizedCode),
+    aliases:
+      Array.isArray(current.aliases) && current.aliases.length
+        ? current.aliases
+        : getCommonEtfAliases(normalizedCode),
+    industry:
+      typeof industry === "string" && industry.trim()
+        ? industry.trim()
+        : current.industry || null,
   };
   return true;
 }
@@ -3259,8 +3278,88 @@ function parseTpexJsonStocks(json) {
   return stocks;
 }
 
+function normalizeIndustryName(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "--" || text === "N/A") return null;
+  return text;
+}
+
+function parseCompanyBasicInfoCsv(text, market = "TWSE") {
+  const lines = String(text || "")
+    .split(/\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) return {};
+
+  const header = parseCsvLine(lines[0]);
+  const codeIndex = header.findIndex((c) => c.includes("公司代號"));
+  const nameIndex = header.findIndex((c) => c.includes("公司名稱"));
+  const industryIndex = header.findIndex((c) => c.includes("產業別"));
+  if (codeIndex < 0 || nameIndex < 0 || industryIndex < 0) return {};
+
+  const stocks = {};
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCsvLine(lines[i]);
+    addStockRecord(stocks, {
+      code: cols[codeIndex],
+      name: cols[nameIndex],
+      market,
+      industry: normalizeIndustryName(cols[industryIndex]),
+    });
+  }
+
+  return stocks;
+}
+
+async function fetchStockIndustryCsv(url, market, sourceLabel) {
+  const res = await fetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "text/csv,*/*;q=0.8",
+    },
+  });
+  const contentType = res.headers.get("content-type") || "";
+  const text = await res.text();
+  const looksLikeHTML = /<html|<!doctype html|頁面無法執行/i.test(text);
+
+  if (!res.ok || looksLikeHTML) {
+    throw new Error(`${sourceLabel} unavailable: ${res.status}`);
+  }
+
+  return {
+    contentType,
+    head120: text.slice(0, 120),
+    stocks: parseCompanyBasicInfoCsv(text, market),
+  };
+}
+
 function getPostMarketPicksCacheKey(dateKey) {
   return `${POSTMARKET_PICKS_CACHE_PREFIX}${dateKey}`;
+}
+
+function getStockIndustryKey(industry) {
+  const text = normalizeStockText(industry);
+  return text || "__UNKNOWN__";
+}
+
+function applyIndustryDiversityLimit(
+  picks,
+  maxPerIndustry = POSTMARKET_MAX_PER_INDUSTRY
+) {
+  const limit =
+    Number.isFinite(maxPerIndustry) && maxPerIndustry > 0 ? maxPerIndustry : 2;
+  const counters = new Map();
+  const selected = [];
+
+  for (const pick of Array.isArray(picks) ? picks : []) {
+    const key = getStockIndustryKey(pick?.industry);
+    const count = counters.get(key) || 0;
+    if (count >= limit) continue;
+    counters.set(key, count + 1);
+    selected.push(pick);
+  }
+
+  return selected;
 }
 
 function getDailyQuotesCacheKey(market, dateKey) {
@@ -4086,6 +4185,7 @@ async function computePostMarketPicks() {
       code: stock.code,
       name: stock.name,
       market: stock.market,
+      industry: stock.industry || null,
       close,
       ma5,
       ma20,
@@ -4137,7 +4237,10 @@ async function computePostMarketPicks() {
     return (b.tradeValue || 0) - (a.tradeValue || 0);
   });
 
-  const recommendedPicks = recommendedCandidates.slice(
+  const diversifiedRecommendedCandidates = applyIndustryDiversityLimit(
+    recommendedCandidates
+  );
+  const recommendedPicks = diversifiedRecommendedCandidates.slice(
     0,
     Number.isFinite(POSTMARKET_REPLY_LIMIT) && POSTMARKET_REPLY_LIMIT > 0
       ? POSTMARKET_REPLY_LIMIT
@@ -6382,6 +6485,8 @@ app.get("/api/update-stocks", async (req, res) => {
   let source = "";
   let twseCount = 0;
   let tpexCount = 0;
+  let twseIndustryCount = 0;
+  let tpexIndustryCount = 0;
 
   try {
     const r = await fetch(TWSE_STOCKS_OPENAPI_URL, {
@@ -6504,8 +6609,65 @@ app.get("/api/update-stocks", async (req, res) => {
     });
   }
 
+  try {
+    const result = await fetchStockIndustryCsv(
+      TWSE_BASIC_INFO_CSV_URL,
+      "TWSE",
+      "twse-basic-info"
+    );
+    twseIndustryCount = Object.keys(result.stocks).length;
+    debug.push({
+      source: "twse-basic-info",
+      status: 200,
+      contentType: result.contentType,
+      count: twseIndustryCount,
+      head120: result.head120,
+    });
+    Object.entries(result.stocks).forEach(([code, info]) => {
+      if (stocks[code]) {
+        stocks[code].industry = info.industry || stocks[code].industry || null;
+      }
+    });
+    source = source ? `${source}+twse-basic-info` : "twse-basic-info";
+  } catch (err) {
+    console.warn("TWSE basic info update failed:", err?.message || err);
+    debug.push({
+      source: "twse-basic-info",
+      error: String(err?.message || err),
+    });
+  }
+
+  try {
+    const result = await fetchStockIndustryCsv(
+      TPEX_BASIC_INFO_CSV_URL,
+      "TPEX",
+      "tpex-basic-info"
+    );
+    tpexIndustryCount = Object.keys(result.stocks).length;
+    debug.push({
+      source: "tpex-basic-info",
+      status: 200,
+      contentType: result.contentType,
+      count: tpexIndustryCount,
+      head120: result.head120,
+    });
+    Object.entries(result.stocks).forEach(([code, info]) => {
+      if (stocks[code]) {
+        stocks[code].industry = info.industry || stocks[code].industry || null;
+      }
+    });
+    source = source ? `${source}+tpex-basic-info` : "tpex-basic-info";
+  } catch (err) {
+    console.warn("TPEX basic info update failed:", err?.message || err);
+    debug.push({
+      source: "tpex-basic-info",
+      error: String(err?.message || err),
+    });
+  }
+
   const count = Object.keys(stocks).length;
   const sampleParsed = Object.values(stocks).slice(0, 5);
+  const industryCount = Object.values(stocks).filter((item) => item?.industry).length;
 
   if (twseCount < MIN_TWSE_STOCK_COUNT) {
     return res.status(502).json({
@@ -6514,6 +6676,8 @@ app.get("/api/update-stocks", async (req, res) => {
       count,
       twseCount,
       tpexCount,
+      twseIndustryCount,
+      tpexIndustryCount,
       minCount: MIN_TWSE_STOCK_COUNT,
       debug,
     });
@@ -6526,6 +6690,7 @@ app.get("/api/update-stocks", async (req, res) => {
       error: "Redis unavailable; stock cache not updated",
       count,
       source,
+      industryCount,
       sampleParsed,
       debug,
     });
@@ -6537,6 +6702,9 @@ app.get("/api/update-stocks", async (req, res) => {
     count,
     twseCount,
     tpexCount,
+    twseIndustryCount,
+    tpexIndustryCount,
+    industryCount,
     debug: {
       sampleParsed,
       sources: debug,
