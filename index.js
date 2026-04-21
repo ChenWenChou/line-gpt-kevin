@@ -424,6 +424,19 @@ const WHEN_LABEL = {
   day_after: "後天",
 };
 
+const WEATHER_TIME_LABEL = {
+  now: "現在",
+  today: "今天",
+  tonight: "今晚",
+  tomorrow: "明天",
+  tomorrow_morning: "明天早上",
+  tomorrow_evening: "明天晚上",
+  day_after: "後天",
+  afternoon: "今天下午",
+  evening: "今天晚上",
+  soon: "接下來 1~3 小時",
+};
+
 const TW_CITY_MAP = {
   台北: "Taipei",
   臺北: "Taipei",
@@ -441,6 +454,38 @@ const TW_CITY_MAP = {
   台東: "Taitung",
   臺東: "Taitung",
 };
+const TW_WEATHER_LOCATIONS = [
+  ...Object.keys(TW_CITY_MAP),
+  "基隆",
+  "苗栗",
+  "彰化",
+  "南投",
+  "雲林",
+  "屏東",
+  "連江",
+  "馬祖",
+  "南竿",
+  "北竿",
+  "東引",
+  "金門",
+  "澎湖",
+  "烏丘",
+];
+const GLOBAL_WEATHER_LOCATIONS = [
+  "大阪",
+  "東京",
+  "京都",
+  "札幌",
+  "橫濱",
+  "首爾",
+  "釜山",
+  "紐約",
+  "巴黎",
+  "倫敦",
+  "新加坡",
+  "香港",
+  "曼谷",
+];
 const WEATHER_CONTEXT_TTL_SECONDS = Number(
   process.env.WEATHER_CONTEXT_TTL_SECONDS || 60 * 60 * 24
 );
@@ -1113,6 +1158,375 @@ function normalizeWhen(raw = "today") {
   return "today";
 }
 
+function looksLikeWeatherRequest(text = "") {
+  return /(天氣|氣溫|溫度|下雨|降雨|冷不冷|熱不熱|體感|濕度|悶不悶|風大|穿什麼|穿搭|外套|短袖|長袖|帶傘|傘|淋雨)/.test(
+    text
+  );
+}
+
+function parseWeatherTimeIntent(text = "") {
+  const t = String(text || "").trim();
+  const checks = [
+    [/明天早上|明早/, "tomorrow_morning"],
+    [/明天晚上|明晚/, "tomorrow_evening"],
+    [/今天晚上|今晚/, "tonight"],
+    [/後天/, "day_after"],
+    [/明天|明日/, "tomorrow"],
+    [/等等|待會|等一下|稍後|接下來/, "soon"],
+    [/現在|目前|此刻|當下/, "now"],
+    [/今天下午|下午/, "afternoon"],
+    [/今天晚上|晚上|晚一點/, "evening"],
+    [/今天|今日/, "today"],
+  ];
+
+  for (const [pattern, timeIntent] of checks) {
+    const matched = t.match(pattern);
+    if (matched) {
+      return { timeIntent, matchedText: matched[0] || null };
+    }
+  }
+
+  return { timeIntent: "today", matchedText: null };
+}
+
+function parseWeatherQueryType(text = "") {
+  const t = String(text || "").trim();
+  const clothing = t.match(/穿什麼|穿搭|外套|短袖|長袖|要穿/i);
+  if (clothing) {
+    return { queryType: "clothing", matchedText: clothing[0] || null };
+  }
+
+  const umbrella = t.match(/帶傘|要不要傘|會不會下雨|會下雨嗎|會淋雨嗎|下雨嗎/i);
+  if (umbrella) {
+    return { queryType: "umbrella", matchedText: umbrella[0] || null };
+  }
+
+  return { queryType: "weather", matchedText: null };
+}
+
+function parseWeatherLocationText(text = "") {
+  const t = String(text || "").trim();
+  const twMatch = TW_WEATHER_LOCATIONS.find((location) => t.includes(location));
+  if (twMatch) return twMatch;
+
+  const foreignExplicit = t.match(
+    /(日本|韓國|美國|法國|英國|新加坡|香港|泰國)\s*([^\s，。！？]+)/i
+  );
+  if (foreignExplicit) {
+    return `${foreignExplicit[1]} ${foreignExplicit[2]}`.trim();
+  }
+
+  const foreignSimple = GLOBAL_WEATHER_LOCATIONS.find((location) =>
+    t.includes(location)
+  );
+  if (foreignSimple) return foreignSimple;
+
+  return null;
+}
+
+function parseWeatherRequest(text = "") {
+  const rawText = String(text || "").trim();
+  if (!rawText || !looksLikeWeatherRequest(rawText)) {
+    return null;
+  }
+
+  const { timeIntent } = parseWeatherTimeIntent(rawText);
+  const { queryType } = parseWeatherQueryType(rawText);
+  const locationText = parseWeatherLocationText(rawText);
+
+  return {
+    rawText,
+    locationText,
+    timeIntent,
+    queryType,
+  };
+}
+
+function getLocalDateString(dt, offsetSec = 0) {
+  const d = new Date((Number(dt) + Number(offsetSec || 0)) * 1000);
+  return d.toISOString().slice(0, 10);
+}
+
+function getLocalHour(dt, offsetSec = 0) {
+  return new Date((Number(dt) + Number(offsetSec || 0)) * 1000).getUTCHours();
+}
+
+function shiftDateString(dateStr, offsetDays) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + offsetDays);
+  return d.toISOString().slice(0, 10);
+}
+
+function filterSlotsByHourRange(slots, offsetSec, startHour, endHour) {
+  return slots.filter((item) => {
+    const hour = getLocalHour(item.dt, offsetSec);
+    return hour >= startHour && hour <= endHour;
+  });
+}
+
+function pickForecastSlotsByIntent(list, offsetSec = 0, timeIntent = "today") {
+  const items = Array.isArray(list) ? list : [];
+  if (!items.length) {
+    return { slots: [], label: WEATHER_TIME_LABEL[timeIntent] || "今天" };
+  }
+
+  if (timeIntent === "now") {
+    return { slots: items.slice(0, 1), label: WEATHER_TIME_LABEL.now };
+  }
+
+  if (timeIntent === "soon") {
+    return { slots: items.slice(0, 3), label: WEATHER_TIME_LABEL.soon };
+  }
+
+  const baseDateStr = getLocalDateString(items[0].dt, offsetSec);
+  const targetDateOffset =
+    timeIntent === "tomorrow" ||
+    timeIntent === "tomorrow_morning" ||
+    timeIntent === "tomorrow_evening"
+      ? 1
+      : timeIntent === "day_after"
+      ? 2
+      : 0;
+  const targetDateStr = shiftDateString(baseDateStr, targetDateOffset);
+  const sameDaySlots = items.filter(
+    (item) => getLocalDateString(item.dt, offsetSec) === targetDateStr
+  );
+
+  let slots = sameDaySlots;
+
+  if (timeIntent === "tonight" || timeIntent === "tomorrow_evening" || timeIntent === "evening") {
+    slots = filterSlotsByHourRange(sameDaySlots, offsetSec, 18, 23);
+  } else if (timeIntent === "tomorrow_morning") {
+    slots = filterSlotsByHourRange(sameDaySlots, offsetSec, 6, 11);
+  } else if (timeIntent === "afternoon") {
+    slots = filterSlotsByHourRange(sameDaySlots, offsetSec, 14, 17);
+  }
+
+  if (!slots.length) {
+    slots = sameDaySlots.length ? sameDaySlots : items.slice(0, 3);
+  }
+
+  return {
+    slots,
+    label: WEATHER_TIME_LABEL[timeIntent] || WEATHER_TIME_LABEL.today,
+  };
+}
+
+function buildForecastSummaryFromSlots(slots = []) {
+  const list = Array.isArray(slots) ? slots : [];
+  if (!list.length) {
+    return {
+      tempMin: null,
+      tempMax: null,
+      feelsMin: null,
+      feelsMax: null,
+      humidityAvg: null,
+      maxPop: null,
+      weatherText: "未知",
+      windSpeedAvg: null,
+    };
+  }
+
+  const temps = list.map((item) => item?.main?.temp).filter(Number.isFinite);
+  const feels = list
+    .map((item) => item?.main?.feels_like)
+    .filter(Number.isFinite);
+  const humidities = list
+    .map((item) => item?.main?.humidity)
+    .filter(Number.isFinite);
+  const pops = list
+    .map((item) =>
+      typeof item?.pop === "number" && Number.isFinite(item.pop)
+        ? item.pop * 100
+        : null
+    )
+    .filter(Number.isFinite);
+  const windSpeeds = list
+    .map((item) => item?.wind?.speed)
+    .filter(Number.isFinite);
+  const descCounter = new Map();
+
+  for (const item of list) {
+    const desc = String(item?.weather?.[0]?.description || "").trim();
+    if (!desc) continue;
+    descCounter.set(desc, (descCounter.get(desc) || 0) + 1);
+  }
+
+  const weatherText =
+    [...descCounter.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ||
+    list[0]?.weather?.[0]?.description ||
+    "未知";
+
+  return {
+    tempMin: temps.length ? Math.min(...temps) : null,
+    tempMax: temps.length ? Math.max(...temps) : null,
+    feelsMin: feels.length ? Math.min(...feels) : null,
+    feelsMax: feels.length ? Math.max(...feels) : null,
+    humidityAvg: humidities.length ? calcAverage(humidities) : null,
+    maxPop: pops.length ? Math.round(Math.max(...pops)) : null,
+    weatherText,
+    windSpeedAvg: windSpeeds.length ? calcAverage(windSpeeds) : null,
+  };
+}
+
+function buildUmbrellaAdvice(summary, timeIntent = "today") {
+  const pop = Number.isFinite(summary?.maxPop) ? summary.maxPop : 0;
+  const weatherText = String(summary?.weatherText || "");
+  const isStormLike = /雷|陣雨|大雨|暴雨/.test(weatherText);
+
+  if (pop >= 50 || (isStormLike && pop >= 30)) {
+    return { level: "yes", text: "建議帶傘。" };
+  }
+  if (pop >= 30 || isStormLike) {
+    return { level: "maybe", text: "建議帶折傘，比較保險。" };
+  }
+  if (timeIntent === "soon" && pop >= 20) {
+    return { level: "maybe", text: "短時間內有零星雨機會，帶折傘較穩。" };
+  }
+
+  return { level: "no", text: "原則上可不帶傘。" };
+}
+
+function buildClothingAdvice(summary, timeIntent = "today") {
+  const feelsMax = Number.isFinite(summary?.feelsMax)
+    ? summary.feelsMax
+    : summary?.tempMax;
+  const feelsMin = Number.isFinite(summary?.feelsMin)
+    ? summary.feelsMin
+    : summary?.tempMin;
+  const pop = Number.isFinite(summary?.maxPop) ? summary.maxPop : 0;
+  const wind = Number.isFinite(summary?.windSpeedAvg) ? summary.windSpeedAvg : 0;
+  const swing =
+    Number.isFinite(feelsMax) && Number.isFinite(feelsMin) ? feelsMax - feelsMin : 0;
+
+  let level = "warm";
+  let text = "短袖即可。";
+
+  if (feelsMax >= 30) {
+    level = "hot";
+    text = "短袖為主，外出注意悶熱與防曬。";
+  } else if (feelsMax >= 24) {
+    level = "warm";
+    text = "短袖或薄長袖都可以。";
+  } else if (feelsMax >= 18) {
+    level = "cool";
+    text = "建議薄外套或長袖，會比較穩。";
+  } else {
+    level = "cold";
+    text = "建議穿外套，偏涼時段要注意保暖。";
+  }
+
+  if (swing >= 6) {
+    text += " 日夜溫差偏大，最好多帶一件薄外套。";
+  } else if (wind >= 8 && level !== "hot") {
+    text += " 風感會更明顯，外層衣物會更實用。";
+  }
+
+  if (pop >= 40) {
+    text += " 若要久待戶外，鞋子盡量選不怕濕的。";
+  }
+
+  return { level, text };
+}
+
+function buildWeatherDecision(summary, request) {
+  const umbrella = buildUmbrellaAdvice(summary, request?.timeIntent);
+  const clothing = buildClothingAdvice(summary, request?.timeIntent);
+  const feelsMax = Number.isFinite(summary?.feelsMax)
+    ? summary.feelsMax
+    : summary?.tempMax;
+  const humidity = Number.isFinite(summary?.humidityAvg)
+    ? Math.round(summary.humidityAvg)
+    : null;
+  const pop = Number.isFinite(summary?.maxPop) ? summary.maxPop : 0;
+
+  let tempTone = "舒適";
+  if (feelsMax >= 30) tempTone = "偏熱";
+  else if (feelsMax >= 24) tempTone = "溫暖";
+  else if (feelsMax >= 18) tempTone = "微涼";
+  else tempTone = "偏冷";
+
+  const rainPhrase =
+    pop >= 50
+      ? "有明顯下雨機會"
+      : pop >= 30
+      ? "有短暫雨機會"
+      : "降雨機率不高";
+  const summaryLine = `${tempTone}，${rainPhrase}。`;
+
+  const comfortNote =
+    humidity !== null && humidity >= 80
+      ? "體感會比實際溫度再悶一些。"
+      : humidity !== null && humidity <= 55
+      ? "空氣相對乾爽。"
+      : "";
+
+  const riskNote =
+    pop >= 40
+      ? "降雨型態偏局部，時段前後仍可能變化。"
+      : request?.timeIntent === "soon"
+      ? "短時間天氣變化較快。"
+      : "";
+
+  return {
+    summaryLine,
+    umbrellaAdvice: umbrella.text,
+    clothingAdvice: clothing.text,
+    comfortNote,
+    riskNote,
+  };
+}
+
+function formatWeatherReplyV2(request, summary, decision, meta = {}) {
+  const locationLabel = meta.displayLocation || request?.locationText || "這裡";
+  const timeLabel =
+    meta.timeLabel || WEATHER_TIME_LABEL[request?.timeIntent] || "今天";
+  const tempRange =
+    Number.isFinite(summary?.tempMin) && Number.isFinite(summary?.tempMax)
+      ? `${summary.tempMin.toFixed(1)}~${summary.tempMax.toFixed(1)}°C`
+      : "資料不足";
+  const popText = Number.isFinite(summary?.maxPop) ? `${summary.maxPop}%` : "—";
+
+  if (request?.queryType === "clothing") {
+    return [
+      `${locationLabel}${timeLabel} ${decision.summaryLine}`,
+      "",
+      decision.clothingAdvice,
+      decision.umbrellaAdvice,
+      decision.comfortNote,
+      decision.riskNote,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (request?.queryType === "umbrella") {
+    return [
+      decision.umbrellaAdvice,
+      "",
+      `${locationLabel}${timeLabel}${decision.summaryLine}`,
+      `氣溫：約 ${tempRange}`,
+      `降雨機率：${popText}`,
+      decision.riskNote,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return [
+    `${locationLabel}${timeLabel}${decision.summaryLine}`,
+    "",
+    `氣溫：約 ${tempRange}`,
+    `降雨機率：${popText}`,
+    `建議：${decision.umbrellaAdvice.replace(/。$/, "")}`,
+    decision.clothingAdvice,
+    decision.comfortNote,
+    decision.riskNote,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function buildOutfitAdvice(temp, feelsLike, rainProbability) {
   const t = feelsLike ?? temp;
   let top = "短袖或輕薄排汗衫";
@@ -1419,6 +1833,9 @@ async function getWeatherAndOutfit({
   lon,
   when = "today",
   address,
+  rawText = "",
+  timeIntent,
+  queryType,
 } = {}) {
   const apiKey = process.env.WEATHER_API_KEY;
   if (!apiKey) {
@@ -1426,14 +1843,28 @@ async function getWeatherAndOutfit({
   }
 
   try {
-    let resolvedCity = city;
+    const parsedRequest = rawText ? parseWeatherRequest(rawText) : null;
+    const resolvedTimeIntent =
+      timeIntent ||
+      parsedRequest?.timeIntent ||
+      (when === "tomorrow"
+        ? "tomorrow"
+        : when === "day_after"
+        ? "day_after"
+        : "today");
+    const resolvedQueryType =
+      queryType || parsedRequest?.queryType || "weather";
+    const requestedLocation =
+      parsedRequest?.locationText || address || city || "Taipei";
+
+    let resolvedCity = requestedLocation;
     let resolvedLat = lat;
     let resolvedLon = lon;
 
-    const isTW = isTaiwanLocation(resolvedCity);
+    const isTW = isTaiwanLocation(requestedLocation);
 
     // 台灣離島先用人工座標
-    const island = findTaiwanIsland(resolvedCity);
+    const island = findTaiwanIsland(requestedLocation);
     if (!resolvedLat && !resolvedLon && island) {
       resolvedLat = island.lat;
       resolvedLon = island.lon;
@@ -1441,10 +1872,10 @@ async function getWeatherAndOutfit({
     }
 
     if (!resolvedLat || !resolvedLon) {
-      const geo = await geocodeCity(city, apiKey);
+      const geo = await geocodeCity(requestedLocation, apiKey);
       if (!geo) {
         // 無法 geocode，改用城市名稱直接查 forecast（預設國家為台灣）
-        resolvedCity = city;
+        resolvedCity = requestedLocation;
       } else {
         resolvedLat = geo.lat;
         resolvedLon = geo.lon;
@@ -1467,155 +1898,66 @@ async function getWeatherAndOutfit({
 
     const data = await res.json();
 
-    // ================================
-    // ✅ 用 forecast 第一筆當「今天」
-    // ================================
     const offsetSec = data.city?.timezone ?? 0;
-
-    // local date helper（只保留這一個）
-    function getLocalDateString(dt, offsetSec) {
-      const d = new Date((dt + offsetSec) * 1000);
-      return d.toISOString().slice(0, 10);
-    }
-
-    const firstItem = data.list?.[0];
-    if (!firstItem) {
+    const forecastList = Array.isArray(data.list) ? data.list : [];
+    if (!forecastList.length) {
       return "暫時查不到天氣資料，請稍後再試。";
     }
 
-    const baseDateStr = getLocalDateString(firstItem.dt, offsetSec);
-
-    const dayIndex = when === "tomorrow" ? 1 : when === "day_after" ? 2 : 0;
-
-    const targetDate = new Date(baseDateStr);
-    targetDate.setDate(targetDate.getDate() + dayIndex);
-    const targetDateStr = targetDate.toISOString().slice(0, 10);
-
-    const pickSlot = (list) => {
-      const sameDay = list.filter((item) => {
-        const local = getLocalDateString(item.dt, offsetSec);
-        return local === targetDateStr;
-      });
-
-      if (sameDay.length === 0) {
-        // 👉 fallback：用 forecast 第一筆
-        return list[0] || null;
-      }
-
-      // ✅ 改成「距離中午最近的一筆」
-      const targetHour = 12;
-
-      return sameDay.reduce((closest, curr) => {
-        const currHour = new Date((curr.dt + offsetSec) * 1000).getUTCHours();
-        const closestHour = new Date(
-          (closest.dt + offsetSec) * 1000
-        ).getUTCHours();
-
-        return Math.abs(currHour - targetHour) <
-          Math.abs(closestHour - targetHour)
-          ? curr
-          : closest;
-      }, sameDay[0]);
-    };
-
-    const slot = pickSlot(data.list || []);
-
-    const sameDayEntries = (data.list || []).filter((item) => {
-      const local = getLocalDateString(item.dt, offsetSec);
-      return local === targetDateStr;
-    });
-
-    // ✅ 計算「當日最高降雨機率」
-    let maxPop = 0;
-
-    if (sameDayEntries.length > 0) {
-      maxPop = Math.max(
-        ...sameDayEntries.map((i) => (typeof i.pop === "number" ? i.pop : 0))
-      );
-    }
-
-    const rainPercent = Math.round(maxPop * 100);
-
-    // 如果找到同日資料 → 計算 max / min
-    let maxTemp = null;
-    let minTemp = null;
-
-    if (sameDayEntries.length > 0) {
-      const temps = sameDayEntries.map((i) => i.main?.temp).filter(Boolean);
-      maxTemp = Math.max(...temps);
-      minTemp = Math.min(...temps);
-    }
-    // --- 計算體感溫度區間 ---
-    let maxFeels = null;
-    let minFeels = null;
-
-    if (sameDayEntries.length > 0) {
-      const feels = sameDayEntries
-        .map((i) => i.main?.feels_like)
-        .filter(Boolean);
-      maxFeels = Math.max(...feels);
-      minFeels = Math.min(...feels);
-    }
-
-    // 格式化（避免 undefined）
-    const tempRangeText =
-      maxTemp !== null
-        ? `氣溫：${minTemp.toFixed(1)}°C ～ ${maxTemp.toFixed(1)}°C\n`
-        : "";
-
-    const feelsRangeText =
-      maxFeels !== null
-        ? `體感：${minFeels.toFixed(1)}°C ～ ${maxFeels.toFixed(1)}°C\n`
-        : "";
-
-    if (!slot) {
+    const { slots, label } = pickForecastSlotsByIntent(
+      forecastList,
+      offsetSec,
+      resolvedTimeIntent
+    );
+    if (!slots.length) {
       return "暫時查不到這個時間點的天氣，等等再試一次。";
     }
 
-    const temp = slot.main?.temp;
-    const feels = slot.main?.feels_like ?? temp;
-
-    const safeMin =
-      minTemp != null ? minTemp.toFixed(1) : temp?.toFixed(1) ?? "--";
-    const safeMax =
-      maxTemp != null ? maxTemp.toFixed(1) : temp?.toFixed(1) ?? "--";
-    const safeFeels = feels != null ? feels.toFixed(1) : "--";
-
-    const humidity = slot.main?.humidity ?? "NA";
-    const desc = slot.weather?.[0]?.description || "未知";
-    const rainText = `降雨機率：${rainPercent}%`;
+    const summary = buildForecastSummaryFromSlots(slots);
     const locationLabel = address
       ? `${address}（座標）`
-      : resolvedCity || city || "未命名地點";
-    const whenLabel = WHEN_LABEL[when] || WHEN_LABEL.today;
-    const outfit = buildOutfitAdvice(temp, feels, maxPop);
-    const maxMinText =
-      maxTemp !== null
-        ? `最高溫：${maxTemp.toFixed(1)}°C\n最低溫：${minTemp.toFixed(1)}°C\n`
-        : "";
-
-    const weatherText =
-      `【${locationLabel}｜${whenLabel}天氣】\n` +
-      `狀態：${desc}\n` +
-      tempRangeText +
-      feelsRangeText +
-      `濕度：${humidity}%\n` +
-      `${rainText}\n\n` +
-      `【穿搭建議】\n` +
-      outfit;
+      : resolvedCity || requestedLocation || "未命名地點";
+    const request = {
+      rawText,
+      locationText: locationLabel,
+      timeIntent: resolvedTimeIntent,
+      queryType: resolvedQueryType,
+    };
+    const decision = buildWeatherDecision(summary, request);
+    const weatherText = formatWeatherReplyV2(request, summary, decision, {
+      displayLocation: locationLabel,
+      timeLabel: label,
+    });
+    const safeMin =
+      summary.tempMin != null ? summary.tempMin.toFixed(1) : "--";
+    const safeMax =
+      summary.tempMax != null ? summary.tempMax.toFixed(1) : "--";
+    const safeFeels =
+      summary.feelsMin != null && summary.feelsMax != null
+        ? summary.feelsMin === summary.feelsMax
+          ? summary.feelsMax.toFixed(1)
+          : `${summary.feelsMin.toFixed(1)}～${summary.feelsMax.toFixed(1)}`
+        : "--";
+    const humidity =
+      summary.humidityAvg != null ? Math.round(summary.humidityAvg) : "NA";
+    const rainPercent = summary.maxPop != null ? summary.maxPop : 0;
+    const outfitText = [decision.clothingAdvice, decision.umbrellaAdvice]
+      .filter(Boolean)
+      .join("\n");
 
     return {
       text: weatherText,
+      preferTextOnly: resolvedQueryType !== "weather",
       data: {
         city: locationLabel,
-        whenLabel,
-        desc,
+        whenLabel: label,
+        desc: summary.weatherText,
         minTemp: safeMin,
         maxTemp: safeMax,
         feels: safeFeels,
         humidity,
         rainPercent,
-        outfitText: outfit,
+        outfitText,
       },
     };
   } catch (err) {
@@ -1626,10 +1968,13 @@ async function getWeatherAndOutfit({
 
 async function replyWeather(replyTarget, result) {
   // 如果整個 result 就是錯誤字串 → 直接回文字
-  if (!result || typeof result === "string" || !result.data) {
+  if (!result || typeof result === "string" || !result.data || result.preferTextOnly) {
     await sendLineReply(replyTarget, {
       type: "text",
-      text: typeof result === "string" ? result : "天氣資料取得失敗",
+      text:
+        typeof result === "string"
+          ? result
+          : result?.text || "天氣資料取得失敗",
     });
     return;
   }
@@ -5141,7 +5486,46 @@ ${sourceNote}`;
       }
 
       // ─────────────────────────────────────
-      // 3️⃣ quickWeatherParse（不用 GPT）
+      // 3️⃣ v2 weather parser（穿搭 / 帶傘 / 時段）
+      // ─────────────────────────────────────
+      const directWeatherRequest = parseWeatherRequest(parsedMessage);
+
+      if (directWeatherRequest) {
+        const last = await getLastWeatherContext(userId);
+        const resolvedLocationRaw = directWeatherRequest.locationText || last?.city;
+
+        if (!resolvedLocationRaw) {
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: "你要查哪裡的天氣？直接給我城市就行，例如「桃園今天要帶傘嗎」。",
+          });
+          continue;
+        }
+
+        const cityClean = cleanCity(resolvedLocationRaw);
+        const island = findTaiwanIsland(cityClean);
+        const city = island ? island.name : fixTaiwanCity(cityClean);
+        const result = await getWeatherAndOutfit({
+          city,
+          timeIntent: directWeatherRequest.timeIntent,
+          queryType: directWeatherRequest.queryType,
+          rawText: parsedMessage,
+          lat: directWeatherRequest.locationText ? island?.lat : last?.lat || island?.lat,
+          lon: directWeatherRequest.locationText ? island?.lon : last?.lon || island?.lon,
+        });
+
+        await setLastWeatherContext(userId, {
+          city,
+          lat: directWeatherRequest.locationText ? island?.lat : last?.lat || island?.lat,
+          lon: directWeatherRequest.locationText ? island?.lon : last?.lon || island?.lon,
+        });
+
+        await replyWeather(event, result);
+        continue;
+      }
+
+      // ─────────────────────────────────────
+      // 4️⃣ quickWeatherParse（不用 GPT）
       // ─────────────────────────────────────
       const quick = quickWeatherParse(userMessage);
 
@@ -5171,7 +5555,7 @@ ${sourceNote}`;
       }
 
       // ─────────────────────────────────────
-      // 4️⃣ GPT WEATHER intent
+      // 5️⃣ GPT WEATHER intent
       // ─────────────────────────────────────
       const intent = await openai.chat.completions.create({
         model: "gpt-4o-mini",
