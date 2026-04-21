@@ -2001,6 +2001,18 @@ const STOCK_INTRADAY_MIN_POINTS = Number(
 const STOCK_INTRADAY_COLLECT_LIMIT = Number(
   process.env.STOCK_INTRADAY_COLLECT_LIMIT || 20
 );
+const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:picks:";
+const DAILY_QUOTES_CACHE_PREFIX = "stock:dailyquotes:";
+const POSTMARKET_SCAN_TTL_SECONDS = Number(
+  process.env.POSTMARKET_SCAN_TTL_SECONDS || 60 * 60 * 20
+);
+const POSTMARKET_REQUIRED_TRADING_DAYS = Number(
+  process.env.POSTMARKET_REQUIRED_TRADING_DAYS || 21
+);
+const POSTMARKET_MAX_CALENDAR_LOOKBACK = Number(
+  process.env.POSTMARKET_MAX_CALENDAR_LOOKBACK || 40
+);
+const POSTMARKET_REPLY_LIMIT = Number(process.env.POSTMARKET_REPLY_LIMIT || 5);
 const QUICKCHART_CREATE_URL = "https://quickchart.io/chart/create";
 const QUICKCHART_TIMEOUT_MS = Number(process.env.QUICKCHART_TIMEOUT_MS || 8000);
 
@@ -2232,6 +2244,496 @@ function parseTpexJsonStocks(json) {
   }
 
   return stocks;
+}
+
+function getPostMarketPicksCacheKey(dateKey) {
+  return `${POSTMARKET_PICKS_CACHE_PREFIX}${dateKey}`;
+}
+
+function getDailyQuotesCacheKey(market, dateKey) {
+  return `${DAILY_QUOTES_CACHE_PREFIX}${market}:${dateKey}`;
+}
+
+function formatTwseQueryDate(date) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}${month}${day}`;
+}
+
+function formatTpexQueryDate(date) {
+  const year = date.getUTCFullYear() - 1911;
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}/${month}/${day}`;
+}
+
+function dateKeyFromDate(date) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getTaipeiCalendarDate(daysAgo = 0) {
+  const parts = taipeiPartsFromUtcMs(
+    Date.now() - daysAgo * 24 * 60 * 60 * 1000
+  );
+  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+}
+
+function parseDailyQuoteVolumeToLots(rawVolume) {
+  const shares = parseMarketNumber(rawVolume);
+  if (typeof shares !== "number") return null;
+  return shares / 1000;
+}
+
+function findTableByFields(tables, fieldPatterns) {
+  return tables.find((table) => {
+    const fields = Array.isArray(table?.fields) ? table.fields.map(String) : [];
+    return fieldPatterns.every((pattern) =>
+      fields.some((field) => field.includes(pattern))
+    );
+  });
+}
+
+function parseTwseDailyQuotes(json, dateKey) {
+  const tables = Array.isArray(json?.tables) ? json.tables : [];
+  const table = findTableByFields(tables, [
+    "證券代號",
+    "證券名稱",
+    "成交股數",
+    "收盤價",
+  ]);
+  if (!table) return {};
+
+  const fields = table.fields.map(String);
+  const rows = Array.isArray(table.data) ? table.data : [];
+  const idx = {
+    code: fields.findIndex((f) => f.includes("證券代號")),
+    name: fields.findIndex((f) => f.includes("證券名稱")),
+    volume: fields.findIndex((f) => f.includes("成交股數")),
+    open: fields.findIndex((f) => f.includes("開盤價")),
+    high: fields.findIndex((f) => f.includes("最高價")),
+    low: fields.findIndex((f) => f.includes("最低價")),
+    close: fields.findIndex((f) => f.includes("收盤價")),
+  };
+  const quotes = {};
+
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    const code = normalizeStockCode(row[idx.code]);
+    if (!code) continue;
+
+    quotes[code] = {
+      code,
+      name: String(row[idx.name] || "").trim(),
+      market: "TWSE",
+      date: dateKey,
+      open: parseMarketNumber(row[idx.open]),
+      high: parseMarketNumber(row[idx.high]),
+      low: parseMarketNumber(row[idx.low]),
+      close: parseMarketNumber(row[idx.close]),
+      volumeLots: parseDailyQuoteVolumeToLots(row[idx.volume]),
+    };
+  }
+
+  return quotes;
+}
+
+function parseTpexDailyQuotes(json, dateKey) {
+  const tables = Array.isArray(json?.tables) ? json.tables : [];
+  const table = findTableByFields(tables, ["代號", "名稱", "收盤", "成交股數"]);
+  if (!table) return {};
+
+  const fields = table.fields.map(String);
+  const rows = Array.isArray(table.data) ? table.data : [];
+  const idx = {
+    code: fields.findIndex((f) => f.includes("代號")),
+    name: fields.findIndex((f) => f.includes("名稱")),
+    volume: fields.findIndex((f) => f.includes("成交股數")),
+    open: fields.findIndex((f) => f.includes("開盤")),
+    high: fields.findIndex((f) => f.includes("最高")),
+    low: fields.findIndex((f) => f.includes("最低")),
+    close: fields.findIndex((f) => f.includes("收盤")),
+  };
+  const quotes = {};
+
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    const code = normalizeStockCode(row[idx.code]);
+    if (!code) continue;
+
+    quotes[code] = {
+      code,
+      name: String(row[idx.name] || "").trim(),
+      market: "TPEX",
+      date: dateKey,
+      open: parseMarketNumber(row[idx.open]),
+      high: parseMarketNumber(row[idx.high]),
+      low: parseMarketNumber(row[idx.low]),
+      close: parseMarketNumber(row[idx.close]),
+      volumeLots: parseDailyQuoteVolumeToLots(row[idx.volume]),
+    };
+  }
+
+  return quotes;
+}
+
+async function fetchTwseDailyQuotesByDate(date) {
+  const dateKey = dateKeyFromDate(date);
+  const cacheKey = getDailyQuotesCacheKey("TWSE", dateKey);
+  const cached = await redisGet(cacheKey);
+  if (cached) {
+    try {
+      return JSON.parse(cached);
+    } catch {
+      // ignore broken cache and refetch
+    }
+  }
+
+  const url = `https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date=${formatTwseQueryDate(
+    date
+  )}&type=ALLBUT0999`;
+  const res = await fetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "application/json,text/plain,*/*",
+    },
+  });
+  if (!res.ok) return {};
+
+  const json = await res.json();
+  if (String(json?.stat || "").toUpperCase() !== "OK") return {};
+
+  const quotes = parseTwseDailyQuotes(json, dateKey);
+  if (Object.keys(quotes).length) {
+    await redisSet(cacheKey, JSON.stringify(quotes), "EX", 60 * 60 * 24 * 7);
+  }
+  return quotes;
+}
+
+async function fetchTpexDailyQuotesByDate(date) {
+  const dateKey = dateKeyFromDate(date);
+  const cacheKey = getDailyQuotesCacheKey("TPEX", dateKey);
+  const cached = await redisGet(cacheKey);
+  if (cached) {
+    try {
+      return JSON.parse(cached);
+    } catch {
+      // ignore broken cache and refetch
+    }
+  }
+
+  const url = `https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date=${encodeURIComponent(
+    formatTpexQueryDate(date)
+  )}&type=EW&response=json`;
+  const res = await fetch(url, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "application/json,text/plain,*/*",
+    },
+  });
+  if (!res.ok) return {};
+
+  const json = await res.json();
+  if (String(json?.stat || "").toLowerCase() !== "ok") return {};
+
+  const quotes = parseTpexDailyQuotes(json, dateKey);
+  if (Object.keys(quotes).length) {
+    await redisSet(cacheKey, JSON.stringify(quotes), "EX", 60 * 60 * 24 * 7);
+  }
+  return quotes;
+}
+
+async function fetchMergedDailyQuotesByDate(date) {
+  const dateKey = dateKeyFromDate(date);
+  const [twseQuotes, tpexQuotes] = await Promise.all([
+    fetchTwseDailyQuotesByDate(date),
+    fetchTpexDailyQuotesByDate(date),
+  ]);
+  const quotes = {
+    ...twseQuotes,
+    ...tpexQuotes,
+  };
+
+  return {
+    dateKey,
+    quotes,
+    count: Object.keys(quotes).length,
+  };
+}
+
+async function getRecentTradingDaySnapshots(requiredTradingDays = 21) {
+  const snapshots = [];
+  const maxLookback =
+    Number.isFinite(POSTMARKET_MAX_CALENDAR_LOOKBACK) &&
+    POSTMARKET_MAX_CALENDAR_LOOKBACK > requiredTradingDays
+      ? POSTMARKET_MAX_CALENDAR_LOOKBACK
+      : 40;
+
+  for (let offset = 0; offset < maxLookback; offset++) {
+    const date = getTaipeiCalendarDate(offset);
+
+    const snapshot = await fetchMergedDailyQuotesByDate(date);
+    if (!snapshot.count) continue;
+
+    snapshots.push(snapshot);
+    if (snapshots.length >= requiredTradingDays) break;
+  }
+
+  return snapshots;
+}
+
+function calcAverage(values) {
+  const valid = values.filter((v) => typeof v === "number" && Number.isFinite(v));
+  if (!valid.length) return null;
+  return valid.reduce((sum, value) => sum + value, 0) / valid.length;
+}
+
+function calcMovingAverage(values, period) {
+  if (!Array.isArray(values) || values.length < period) return null;
+  return calcAverage(values.slice(values.length - period));
+}
+
+function calcPercentChange(current, previous) {
+  if (
+    typeof current !== "number" ||
+    typeof previous !== "number" ||
+    !Number.isFinite(current) ||
+    !Number.isFinite(previous) ||
+    previous <= 0
+  ) {
+    return null;
+  }
+  return ((current - previous) / previous) * 100;
+}
+
+function isEtfStock(stock) {
+  const code = normalizeStockCode(stock?.code);
+  const name = String(stock?.name || "");
+  if (!code) return true;
+  if (!/^\d{4}$/.test(code)) return true;
+  if (/^(?:00|02|91)/.test(code)) return true;
+  if (/-DR|甲特|乙特|丙特|特別股/.test(name)) return true;
+
+  const etfKeywords = [
+    "ETF",
+    "ETN",
+    "槓桿",
+    "反向",
+    "正2",
+    "反1",
+    "高股息",
+    "台灣50",
+    "MSCI",
+    "ESG",
+    "永續",
+    "債",
+  ];
+  return etfKeywords.some((keyword) => name.includes(keyword));
+}
+
+function scorePostMarketCandidate(metrics) {
+  const score5d = Math.min(30, Math.max(0, metrics.change5d * 3));
+  const score20d = Math.min(25, Math.max(0, metrics.change20d * 1.25));
+  const scoreVolume = Math.min(
+    25,
+    Math.max(0, (metrics.volumeRatio - 1.1) * 50)
+  );
+
+  let scoreBias = 0;
+  if (metrics.bias20 >= 0.02 && metrics.bias20 <= 0.08) scoreBias = 20;
+  else if (metrics.bias20 > 0 && metrics.bias20 < 0.02) scoreBias = 10;
+  else if (metrics.bias20 > 0.08 && metrics.bias20 <= 0.12) scoreBias = 10;
+
+  return {
+    score5d,
+    score20d,
+    scoreVolume,
+    scoreBias,
+    totalScore: Number((score5d + score20d + scoreVolume + scoreBias).toFixed(2)),
+  };
+}
+
+function buildPostMarketPickComment(metrics) {
+  if (metrics.volumeRatio >= 1.5 && metrics.change20d >= 10) {
+    return "量價齊揚，短中期結構偏強";
+  }
+  if (metrics.bias20 >= 0.02 && metrics.bias20 <= 0.08 && metrics.volumeRatio >= 1.2) {
+    return "站穩20日線，量能溫和放大";
+  }
+  return "短線續強，仍維持多頭排列";
+}
+
+function formatPostMarketPicksText(dateKey, picks) {
+  if (!Array.isArray(picks) || !picks.length) {
+    return `📌 今日盤後選股（${dateKey}）\n目前沒有符合條件的標的。`;
+  }
+
+  const lines = [`📌 今日盤後選股（${dateKey}）`];
+
+  picks.forEach((pick, index) => {
+    lines.push("");
+    lines.push(`${index + 1}. ${pick.code} ${pick.name}`);
+    lines.push(
+      `收盤 ${fmtTWPrice(pick.close)}｜5日 ${pick.change5d.toFixed(
+        1
+      )}%｜20日 ${pick.change20d.toFixed(1)}%`
+    );
+    lines.push(
+      `量比 ${pick.volumeRatio.toFixed(2)}｜5MA ${fmtTWPrice(
+        pick.ma5
+      )}｜20MA ${fmtTWPrice(pick.ma20)}`
+    );
+    lines.push(`短評：${pick.comment}`);
+  });
+
+  lines.push("");
+  lines.push("條件：5~40元、5MA>20MA、站上20MA、5/20日漲幅為正、量能放大、排除ETF");
+  return lines.join("\n");
+}
+
+async function computePostMarketPicks() {
+  const raw = await redisGet(STOCKS_REDIS_KEY);
+  const stocks = raw ? JSON.parse(raw) : {};
+  const snapshots = await getRecentTradingDaySnapshots(
+    Number.isFinite(POSTMARKET_REQUIRED_TRADING_DAYS) &&
+      POSTMARKET_REQUIRED_TRADING_DAYS > 20
+      ? POSTMARKET_REQUIRED_TRADING_DAYS
+      : 21
+  );
+
+  if (snapshots.length < 21) {
+    throw new Error("not enough trading day snapshots");
+  }
+
+  const newestToOldest = snapshots;
+  const latestDateKey = newestToOldest[0].dateKey;
+  const orderedSnapshots = [...newestToOldest].reverse();
+  const candidates = [];
+
+  for (const stock of Object.values(stocks)) {
+    if (!stock || isEtfStock(stock)) continue;
+
+    const series = orderedSnapshots
+      .map((snapshot) => snapshot.quotes[stock.code] || null)
+      .filter(
+        (quote) =>
+          quote &&
+          typeof quote.close === "number" &&
+          typeof quote.volumeLots === "number"
+      );
+
+    if (series.length < 21) continue;
+
+    const closes = series.map((quote) => quote.close);
+    const volumes = series.map((quote) => quote.volumeLots);
+    const close = closes[closes.length - 1];
+    const ma5 = calcMovingAverage(closes, 5);
+    const ma20 = calcMovingAverage(closes, 20);
+    const change5d = calcPercentChange(close, closes[closes.length - 6]);
+    const change20d = calcPercentChange(close, closes[closes.length - 21]);
+    const avgVol5 = calcAverage(volumes.slice(volumes.length - 5));
+    const avgVol20 = calcAverage(volumes.slice(volumes.length - 20));
+
+    if (
+      [close, ma5, ma20, change5d, change20d, avgVol5, avgVol20].some(
+        (value) => typeof value !== "number" || !Number.isFinite(value)
+      )
+    ) {
+      continue;
+    }
+
+    const volumeRatio = avgVol20 > 0 ? avgVol5 / avgVol20 : 0;
+    const bias20 = ma20 > 0 ? (close - ma20) / ma20 : -1;
+
+    if (close < 5 || close > 40) continue;
+    if (!(ma5 > ma20)) continue;
+    if (!(close > ma20)) continue;
+    if (!(change5d > 0)) continue;
+    if (!(change20d > 0)) continue;
+    if (!(avgVol5 >= avgVol20 * 1.1)) continue;
+    if (!(avgVol20 >= 1000)) continue;
+
+    const score = scorePostMarketCandidate({
+      change5d,
+      change20d,
+      volumeRatio,
+      bias20,
+    });
+
+    candidates.push({
+      code: stock.code,
+      name: stock.name,
+      market: stock.market,
+      close,
+      ma5,
+      ma20,
+      change5d,
+      change20d,
+      avgVol5,
+      avgVol20,
+      volumeRatio,
+      bias20,
+      comment: buildPostMarketPickComment({
+        change20d,
+        volumeRatio,
+        bias20,
+      }),
+      ...score,
+    });
+  }
+
+  candidates.sort((a, b) => {
+    if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+    if (b.volumeRatio !== a.volumeRatio) return b.volumeRatio - a.volumeRatio;
+    if (b.change20d !== a.change20d) return b.change20d - a.change20d;
+    return Math.abs(a.bias20 - 0.05) - Math.abs(b.bias20 - 0.05);
+  });
+
+  const picks = candidates.slice(
+    0,
+    Number.isFinite(POSTMARKET_REPLY_LIMIT) && POSTMARKET_REPLY_LIMIT > 0
+      ? POSTMARKET_REPLY_LIMIT
+      : 5
+  );
+  const payload = {
+    dateKey: latestDateKey,
+    generatedAt: new Date().toISOString(),
+    totalCandidates: candidates.length,
+    picks,
+  };
+
+  await redisSet(
+    getPostMarketPicksCacheKey(latestDateKey),
+    JSON.stringify(payload),
+    "EX",
+    Number.isFinite(POSTMARKET_SCAN_TTL_SECONDS) && POSTMARKET_SCAN_TTL_SECONDS > 0
+      ? POSTMARKET_SCAN_TTL_SECONDS
+      : 60 * 60 * 20
+  );
+
+  return payload;
+}
+
+async function getOrBuildPostMarketPicks() {
+  const snapshots = await getRecentTradingDaySnapshots(1);
+  if (!snapshots.length) {
+    throw new Error("latest trading date unavailable");
+  }
+
+  const latestDateKey = snapshots[0].dateKey;
+  const cached = await redisGet(getPostMarketPicksCacheKey(latestDateKey));
+  if (cached) {
+    try {
+      return JSON.parse(cached);
+    } catch {
+      // ignore and rebuild
+    }
+  }
+
+  return computePostMarketPicks();
 }
 
 async function findStock(query) {
@@ -4038,6 +4540,26 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           text: lines.join("\n"),
         });
 
+        continue;
+      }
+
+      // ─────────────────────────────────────
+      // 📌 今日盤後選股
+      // ─────────────────────────────────────
+      if (/今日盤後選股/.test(parsedMessage)) {
+        try {
+          const payload = await getOrBuildPostMarketPicks();
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: formatPostMarketPicksText(payload.dateKey, payload.picks),
+          });
+        } catch (err) {
+          console.error("postmarket picks failed:", err?.message || err);
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: "今日盤後選股暫時產生失敗，請晚點再試。",
+          });
+        }
         continue;
       }
 
