@@ -3931,6 +3931,7 @@ function normalizePostMarketPick(pick) {
 
   return {
     ...pick,
+    industry: normalizeIndustryName(pick.industry),
     bias5,
     bias20,
     tradeValue,
@@ -4021,11 +4022,34 @@ async function decoratePostMarketPicksPayload(payload) {
   }
 
   const streakCodes = await getRecentPostMarketStreakCodes(3);
+  let stockIndustryByCode = new Map();
+  try {
+    const rawStocks = await redisGet(STOCKS_REDIS_KEY);
+    const stocks = rawStocks ? JSON.parse(rawStocks) : {};
+    stockIndustryByCode = new Map(
+      Object.values(stocks)
+        .filter((stock) => stock?.code)
+        .map((stock) => [
+          stock.code,
+          normalizeIndustryName(stock?.industry) || null,
+        ])
+    );
+  } catch {
+    stockIndustryByCode = new Map();
+  }
   const decorateList = (list) =>
-    (Array.isArray(list) ? list : []).map((pick) => ({
-      ...normalizePostMarketPick(pick),
-      streak3d: streakCodes.has(pick?.code),
-    }));
+    (Array.isArray(list) ? list : []).map((pick) => {
+      const normalized = normalizePostMarketPick(pick);
+      const industry =
+        normalized?.industry ||
+        stockIndustryByCode.get(normalized?.code) ||
+        null;
+      return {
+        ...normalized,
+        industry,
+        streak3d: streakCodes.has(normalized?.code),
+      };
+    });
 
   return {
     ...payload,
