@@ -368,6 +368,152 @@ const __dirname = new URL(".", import.meta.url).pathname;
 const mazuLots = JSON.parse(
   fs.readFileSync(path.join(__dirname, "mazu_lots.json"), "utf8")
 );
+const twAdminDivisions = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "data", "tw-admin-divisions.json"), "utf8")
+);
+
+function createTaiVariants(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  const variants = new Set([text]);
+  if (text.includes("臺")) variants.add(text.replace(/臺/g, "台"));
+  if (text.includes("台")) variants.add(text.replace(/台/g, "臺"));
+  return [...variants].filter(Boolean);
+}
+
+function stripTaiwanAdminSuffix(name = "") {
+  const text = String(name || "").trim();
+  if (text.length <= 2) return "";
+  return /[市鎮鄉區]$/.test(text) ? text.slice(0, -1) : "";
+}
+
+function buildCountyAliases(name = "") {
+  const aliases = new Set(createTaiVariants(name));
+  for (const variant of createTaiVariants(stripTaiwanAdminSuffix(name))) {
+    aliases.add(variant);
+  }
+  return [...aliases].filter(Boolean);
+}
+
+function buildDistrictAliases(name = "") {
+  const aliases = new Set(createTaiVariants(name));
+  const stripped = stripTaiwanAdminSuffix(name);
+  if (stripped) {
+    for (const variant of createTaiVariants(stripped)) {
+      aliases.add(variant);
+    }
+  }
+  return [...aliases].filter(Boolean);
+}
+
+const COUNTY_ALIAS_OVERRIDES = {
+  台北: "臺北市",
+  臺北: "臺北市",
+  台中: "臺中市",
+  臺中: "臺中市",
+  台南: "臺南市",
+  臺南: "臺南市",
+  台東: "臺東縣",
+  臺東: "臺東縣",
+  新竹: "新竹市",
+  嘉義: "嘉義市",
+  馬祖: "連江縣",
+  南竿: "連江縣",
+  北竿: "連江縣",
+  東引: "連江縣",
+};
+
+function buildCountyAliasMap(counties = []) {
+  const candidates = new Map();
+  for (const county of counties) {
+    const countyName = String(county?.name || "").trim();
+    if (!countyName) continue;
+    for (const alias of buildCountyAliases(countyName)) {
+      if (!candidates.has(alias)) candidates.set(alias, new Set());
+      candidates.get(alias).add(countyName);
+    }
+  }
+
+  const map = {};
+  for (const [alias, names] of candidates.entries()) {
+    if (names.size === 1) {
+      map[alias] = [...names][0];
+    }
+  }
+
+  for (const [alias, countyName] of Object.entries(COUNTY_ALIAS_OVERRIDES)) {
+    map[alias] = countyName;
+  }
+
+  return map;
+}
+
+function buildDistrictLookup(counties = []) {
+  const aliasCandidates = new Map();
+  const districts = [];
+
+  for (const county of counties) {
+    const countyName = String(county?.name || "").trim();
+    const subdivisions = Array.isArray(county?.subdivisions) ? county.subdivisions : [];
+    for (const rawName of subdivisions) {
+      const displayName = String(rawName || "").trim();
+      if (!displayName) continue;
+      const district = {
+        displayName,
+        countyName,
+        aliases: buildDistrictAliases(displayName),
+      };
+      districts.push(district);
+      for (const alias of district.aliases) {
+        if (!aliasCandidates.has(alias)) aliasCandidates.set(alias, []);
+        aliasCandidates.get(alias).push({
+          displayName,
+          countyName,
+        });
+      }
+    }
+  }
+
+  const aliasMap = {};
+  const ambiguousAliases = new Set();
+  const ambiguousCandidates = {};
+
+  for (const [alias, candidates] of aliasCandidates.entries()) {
+    const uniq = candidates.filter(
+      (candidate, index, arr) =>
+        arr.findIndex(
+          (item) =>
+            item.displayName === candidate.displayName &&
+            item.countyName === candidate.countyName
+        ) === index
+    );
+
+    if (uniq.length === 1) {
+      aliasMap[alias] = uniq[0];
+      continue;
+    }
+
+    ambiguousAliases.add(alias);
+    ambiguousCandidates[alias] = uniq.sort((a, b) => {
+      if (a.displayName !== b.displayName) {
+        return a.displayName.localeCompare(b.displayName, "zh-Hant");
+      }
+      return a.countyName.localeCompare(b.countyName, "zh-Hant");
+    });
+  }
+
+  return {
+    districts: districts.sort((a, b) => {
+      if (a.countyName !== b.countyName) {
+        return a.countyName.localeCompare(b.countyName, "zh-Hant");
+      }
+      return a.displayName.localeCompare(b.displayName, "zh-Hant");
+    }),
+    aliasMap,
+    ambiguousAliases,
+    ambiguousCandidates,
+  };
+}
 
 const BOT_USER_ID = "U51d2392e43f851607a191adb3ec49b26";
 const app = express();
@@ -1210,8 +1356,7 @@ function resolveTaiwanDistrict(text = "", contextCountyName = "") {
   if (!input) return null;
   const contextCounty = String(contextCountyName || "").trim();
 
-  const keys = Object.keys(TW_DISTRICT_ALIAS_MAP).sort((a, b) => b.length - a.length);
-  for (const key of keys) {
+  for (const key of TW_DISTRICT_ALIAS_KEYS) {
     if (!input.includes(key)) continue;
 
     if (AMBIGUOUS_DISTRICT_ALIASES.has(key)) {
@@ -1273,7 +1418,8 @@ function resolveTaiwanWeatherLocation(text = "", contextCountyName = "") {
   const district = resolveTaiwanDistrict(input, contextCountyName);
   if (district) return district;
 
-  for (const [key, countyName] of Object.entries(CWA_LOCATION_MAP)) {
+  const countyEntries = Object.entries(CWA_LOCATION_MAP).sort((a, b) => b[0].length - a[0].length);
+  for (const [key, countyName] of countyEntries) {
     if (!input.includes(key)) continue;
     return {
       input: key,
@@ -1707,218 +1853,21 @@ const TAIWAN_ISLANDS = {
   馬祖: { lat: 26.1597, lon: 119.9519, name: "馬祖" },
   馬祖列島: { lat: 26.1597, lon: 119.9519, name: "馬祖列島" },
 };
-const CWA_LOCATION_MAP = {
-  台北: "臺北市",
-  臺北: "臺北市",
-  新北: "新北市",
-  桃園: "桃園市",
-  台中: "臺中市",
-  臺中: "臺中市",
-  台南: "臺南市",
-  臺南: "臺南市",
-  高雄: "高雄市",
-  基隆: "基隆市",
-  新竹: "新竹市",
-  嘉義: "嘉義市",
-  宜蘭: "宜蘭縣",
-  花蓮: "花蓮縣",
-  台東: "臺東縣",
-  臺東: "臺東縣",
-  苗栗: "苗栗縣",
-  彰化: "彰化縣",
-  南投: "南投縣",
-  雲林: "雲林縣",
-  屏東: "屏東縣",
-  澎湖: "澎湖縣",
-  金門: "金門縣",
-  馬祖: "連江縣",
-  南竿: "連江縣",
-  北竿: "連江縣",
-  東引: "連江縣",
-};
-const TW_DISTRICT_ALIAS_MAP = {
-  中正: { displayName: "中正區", countyName: "臺北市" },
-  大同: { displayName: "大同區", countyName: "臺北市" },
-  中山: { displayName: "中山區", countyName: "臺北市" },
-  松山: { displayName: "松山區", countyName: "臺北市" },
-  大安: { displayName: "大安區", countyName: "臺北市" },
-  萬華: { displayName: "萬華區", countyName: "臺北市" },
-  信義: { displayName: "信義區", countyName: "臺北市" },
-  士林: { displayName: "士林區", countyName: "臺北市" },
-  北投: { displayName: "北投區", countyName: "臺北市" },
-  內湖: { displayName: "內湖區", countyName: "臺北市" },
-  南港: { displayName: "南港區", countyName: "臺北市" },
-  文山: { displayName: "文山區", countyName: "臺北市" },
-  板橋: { displayName: "板橋區", countyName: "新北市" },
-  新莊: { displayName: "新莊區", countyName: "新北市" },
-  中和: { displayName: "中和區", countyName: "新北市" },
-  永和: { displayName: "永和區", countyName: "新北市" },
-  三重: { displayName: "三重區", countyName: "新北市" },
-  新店: { displayName: "新店區", countyName: "新北市" },
-  土城: { displayName: "土城區", countyName: "新北市" },
-  樹林: { displayName: "樹林區", countyName: "新北市" },
-  鶯歌: { displayName: "鶯歌區", countyName: "新北市" },
-  三峽: { displayName: "三峽區", countyName: "新北市" },
-  淡水: { displayName: "淡水區", countyName: "新北市" },
-  汐止: { displayName: "汐止區", countyName: "新北市" },
-  瑞芳: { displayName: "瑞芳區", countyName: "新北市" },
-  林口: { displayName: "林口區", countyName: "新北市" },
-  五股: { displayName: "五股區", countyName: "新北市" },
-  泰山: { displayName: "泰山區", countyName: "新北市" },
-  蘆洲: { displayName: "蘆洲區", countyName: "新北市" },
-  八里: { displayName: "八里區", countyName: "新北市" },
-  三芝: { displayName: "三芝區", countyName: "新北市" },
-  石門: { displayName: "石門區", countyName: "新北市" },
-  中壢: { displayName: "中壢區", countyName: "桃園市" },
-  平鎮: { displayName: "平鎮區", countyName: "桃園市" },
-  龜山: { displayName: "龜山區", countyName: "桃園市" },
-  八德: { displayName: "八德區", countyName: "桃園市" },
-  蘆竹: { displayName: "蘆竹區", countyName: "桃園市" },
-  大園: { displayName: "大園區", countyName: "桃園市" },
-  楊梅: { displayName: "楊梅區", countyName: "桃園市" },
-  龍潭: { displayName: "龍潭區", countyName: "桃園市" },
-  大溪: { displayName: "大溪區", countyName: "桃園市" },
-  觀音: { displayName: "觀音區", countyName: "桃園市" },
-  復興: { displayName: "復興區", countyName: "桃園市" },
-  東區: { displayName: "東區", countyName: "新竹市" },
-  北區: { displayName: "北區", countyName: "新竹市" },
-  香山: { displayName: "香山區", countyName: "新竹市" },
-  竹北: { displayName: "竹北市", countyName: "新竹縣" },
-  竹東: { displayName: "竹東鎮", countyName: "新竹縣" },
-  湖口: { displayName: "湖口鄉", countyName: "新竹縣" },
-  新豐: { displayName: "新豐鄉", countyName: "新竹縣" },
-  新埔: { displayName: "新埔鎮", countyName: "新竹縣" },
-  關西: { displayName: "關西鎮", countyName: "新竹縣" },
-  芎林: { displayName: "芎林鄉", countyName: "新竹縣" },
-  竹南: { displayName: "竹南鎮", countyName: "苗栗縣" },
-  頭份: { displayName: "頭份市", countyName: "苗栗縣" },
-  苗栗市: { displayName: "苗栗市", countyName: "苗栗縣" },
-  苗栗: { displayName: "苗栗市", countyName: "苗栗縣" },
-  豐原: { displayName: "豐原區", countyName: "臺中市" },
-  東勢: { displayName: "東勢區", countyName: "臺中市" },
-  大甲: { displayName: "大甲區", countyName: "臺中市" },
-  清水: { displayName: "清水區", countyName: "臺中市" },
-  沙鹿: { displayName: "沙鹿區", countyName: "臺中市" },
-  梧棲: { displayName: "梧棲區", countyName: "臺中市" },
-  后里: { displayName: "后里區", countyName: "臺中市" },
-  神岡: { displayName: "神岡區", countyName: "臺中市" },
-  潭子: { displayName: "潭子區", countyName: "臺中市" },
-  大雅: { displayName: "大雅區", countyName: "臺中市" },
-  新社: { displayName: "新社區", countyName: "臺中市" },
-  石岡: { displayName: "石岡區", countyName: "臺中市" },
-  外埔: { displayName: "外埔區", countyName: "臺中市" },
-  大安區台中: { displayName: "大安區", countyName: "臺中市" },
-  烏日: { displayName: "烏日區", countyName: "臺中市" },
-  大肚: { displayName: "大肚區", countyName: "臺中市" },
-  龍井: { displayName: "龍井區", countyName: "臺中市" },
-  霧峰: { displayName: "霧峰區", countyName: "臺中市" },
-  太平: { displayName: "太平區", countyName: "臺中市" },
-  大里: { displayName: "大里區", countyName: "臺中市" },
-  和平: { displayName: "和平區", countyName: "臺中市" },
-  西屯: { displayName: "西屯區", countyName: "臺中市" },
-  南屯: { displayName: "南屯區", countyName: "臺中市" },
-  北屯: { displayName: "北屯區", countyName: "臺中市" },
-  彰化市: { displayName: "彰化市", countyName: "彰化縣" },
-  彰化: { displayName: "彰化市", countyName: "彰化縣" },
-  員林: { displayName: "員林市", countyName: "彰化縣" },
-  鹿港: { displayName: "鹿港鎮", countyName: "彰化縣" },
-  和美: { displayName: "和美鎮", countyName: "彰化縣" },
-  溪湖: { displayName: "溪湖鎮", countyName: "彰化縣" },
-  埔心: { displayName: "埔心鄉", countyName: "彰化縣" },
-  埔鹽: { displayName: "埔鹽鄉", countyName: "彰化縣" },
-  埔里: { displayName: "埔里鎮", countyName: "南投縣" },
-  南投市: { displayName: "南投市", countyName: "南投縣" },
-  南投: { displayName: "南投市", countyName: "南投縣" },
-  草屯: { displayName: "草屯鎮", countyName: "南投縣" },
-  斗六: { displayName: "斗六市", countyName: "雲林縣" },
-  斗南: { displayName: "斗南鎮", countyName: "雲林縣" },
-  虎尾: { displayName: "虎尾鎮", countyName: "雲林縣" },
-  北港: { displayName: "北港鎮", countyName: "雲林縣" },
-  嘉義市: { displayName: "嘉義市", countyName: "嘉義市" },
-  嘉義: { displayName: "嘉義市", countyName: "嘉義市" },
-  太保: { displayName: "太保市", countyName: "嘉義縣" },
-  朴子: { displayName: "朴子市", countyName: "嘉義縣" },
-  民雄: { displayName: "民雄鄉", countyName: "嘉義縣" },
-  東區台南: { displayName: "東區", countyName: "臺南市" },
-  南區台南: { displayName: "南區", countyName: "臺南市" },
-  北區台南: { displayName: "北區", countyName: "臺南市" },
-  安平: { displayName: "安平區", countyName: "臺南市" },
-  安南: { displayName: "安南區", countyName: "臺南市" },
-  永康: { displayName: "永康區", countyName: "臺南市" },
-  歸仁: { displayName: "歸仁區", countyName: "臺南市" },
-  仁德: { displayName: "仁德區", countyName: "臺南市" },
-  新營: { displayName: "新營區", countyName: "臺南市" },
-  善化: { displayName: "善化區", countyName: "臺南市" },
-  新市: { displayName: "新市區", countyName: "臺南市" },
-  三民: { displayName: "三民區", countyName: "高雄市" },
-  左營: { displayName: "左營區", countyName: "高雄市" },
-  楠梓: { displayName: "楠梓區", countyName: "高雄市" },
-  鼓山: { displayName: "鼓山區", countyName: "高雄市" },
-  苓雅: { displayName: "苓雅區", countyName: "高雄市" },
-  前鎮: { displayName: "前鎮區", countyName: "高雄市" },
-  小港: { displayName: "小港區", countyName: "高雄市" },
-  鳳山: { displayName: "鳳山區", countyName: "高雄市" },
-  岡山: { displayName: "岡山區", countyName: "高雄市" },
-  橋頭: { displayName: "橋頭區", countyName: "高雄市" },
-  大寮: { displayName: "大寮區", countyName: "高雄市" },
-  羅東: { displayName: "羅東鎮", countyName: "宜蘭縣" },
-  礁溪: { displayName: "礁溪鄉", countyName: "宜蘭縣" },
-  宜蘭市: { displayName: "宜蘭市", countyName: "宜蘭縣" },
-  宜蘭: { displayName: "宜蘭市", countyName: "宜蘭縣" },
-  蘇澳: { displayName: "蘇澳鎮", countyName: "宜蘭縣" },
-  花蓮市: { displayName: "花蓮市", countyName: "花蓮縣" },
-  花蓮: { displayName: "花蓮市", countyName: "花蓮縣" },
-  吉安: { displayName: "吉安鄉", countyName: "花蓮縣" },
-  臺東市: { displayName: "臺東市", countyName: "臺東縣" },
-  台東市: { displayName: "臺東市", countyName: "臺東縣" },
-  台東: { displayName: "臺東市", countyName: "臺東縣" },
-  臺東: { displayName: "臺東市", countyName: "臺東縣" },
-  屏東市: { displayName: "屏東市", countyName: "屏東縣" },
-  屏東: { displayName: "屏東市", countyName: "屏東縣" },
-};
-const AMBIGUOUS_DISTRICT_ALIASES = new Set([
-  "中正",
-  "大同",
-  "中山",
-  "信義",
-  "東區",
-  "西區",
-  "南區",
-  "北區",
-  "和平",
-]);
-const AMBIGUOUS_DISTRICT_CANDIDATES = {
-  中正: [
-    { displayName: "中正區", countyName: "臺北市" },
-    { displayName: "中正區", countyName: "基隆市" },
-  ],
-  中山: [
-    { displayName: "中山區", countyName: "臺北市" },
-    { displayName: "中山區", countyName: "基隆市" },
-  ],
-  信義: [
-    { displayName: "信義區", countyName: "臺北市" },
-    { displayName: "信義區", countyName: "基隆市" },
-  ],
-  東區: [
-    { displayName: "東區", countyName: "新竹市" },
-    { displayName: "東區", countyName: "嘉義市" },
-    { displayName: "東區", countyName: "臺南市" },
-  ],
-  西區: [
-    { displayName: "西區", countyName: "嘉義市" },
-    { displayName: "西區", countyName: "臺中市" },
-  ],
-  南區: [
-    { displayName: "南區", countyName: "臺南市" },
-    { displayName: "南區", countyName: "臺中市" },
-  ],
-  北區: [
-    { displayName: "北區", countyName: "新竹市" },
-    { displayName: "北區", countyName: "臺中市" },
-    { displayName: "北區", countyName: "臺南市" },
-  ],
-};
+const TW_ADMIN_DIVISION_COUNTIES = Array.isArray(twAdminDivisions?.counties)
+  ? twAdminDivisions.counties
+  : [];
+const CWA_LOCATION_MAP = buildCountyAliasMap(TW_ADMIN_DIVISION_COUNTIES);
+const TW_DISTRICT_LOOKUP = buildDistrictLookup(TW_ADMIN_DIVISION_COUNTIES);
+const TW_DISTRICT_LIST = TW_DISTRICT_LOOKUP.districts;
+const TW_DISTRICT_ALIAS_MAP = TW_DISTRICT_LOOKUP.aliasMap;
+const AMBIGUOUS_DISTRICT_ALIASES = TW_DISTRICT_LOOKUP.ambiguousAliases;
+const AMBIGUOUS_DISTRICT_CANDIDATES = TW_DISTRICT_LOOKUP.ambiguousCandidates;
+const TW_DISTRICT_ALIAS_KEYS = [
+  ...new Set([
+    ...Object.keys(TW_DISTRICT_ALIAS_MAP),
+    ...AMBIGUOUS_DISTRICT_ALIASES,
+  ]),
+].sort((a, b) => b.length - a.length);
 
 function findTaiwanIsland(raw) {
   if (!raw) return null;
@@ -6545,21 +6494,22 @@ app.get("/api/update-stocks", async (req, res) => {
 });
 
 app.get("/api/weather-locations", (req, res) => {
-  const counties = Object.entries(CWA_LOCATION_MAP)
-    .map(([alias, countyName]) => ({ alias, countyName }))
-    .sort((a, b) => a.alias.localeCompare(b.alias, "zh-Hant"));
-  const districts = Object.entries(TW_DISTRICT_ALIAS_MAP)
-    .map(([alias, value]) => ({
-      alias,
-      displayName: value.displayName,
-      countyName: value.countyName,
-    }))
-    .sort((a, b) => a.alias.localeCompare(b.alias, "zh-Hant"));
+  const counties = TW_ADMIN_DIVISION_COUNTIES.map((county) => ({
+    displayName: county.name,
+    subdivisions: Array.isArray(county.subdivisions) ? county.subdivisions : [],
+    aliases: buildCountyAliases(county.name),
+  })).sort((a, b) => a.displayName.localeCompare(b.displayName, "zh-Hant"));
+  const districts = TW_DISTRICT_LIST.map((district) => ({
+    displayName: district.displayName,
+    countyName: district.countyName,
+    aliases: district.aliases,
+  }));
 
   return res.json({
     ok: true,
     countyCount: counties.length,
     districtCount: districts.length,
+    districtAliasCount: Object.keys(TW_DISTRICT_ALIAS_MAP).length,
     ambiguousAliases: [...AMBIGUOUS_DISTRICT_ALIASES].sort((a, b) =>
       a.localeCompare(b, "zh-Hant")
     ),
