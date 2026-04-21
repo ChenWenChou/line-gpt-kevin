@@ -2603,6 +2603,74 @@ function normalizePostMarketPick(pick) {
   };
 }
 
+async function getRecentPostMarketStreakCodes(requiredDays = 3) {
+  if (!Number.isFinite(requiredDays) || requiredDays < 2) {
+    return new Set();
+  }
+
+  const snapshots = await getRecentTradingDaySnapshots(requiredDays);
+  if (snapshots.length < requiredDays) {
+    return new Set();
+  }
+
+  const dailySets = [];
+
+  for (const snapshot of snapshots.slice(0, requiredDays)) {
+    const cached = await redisGet(getPostMarketPicksCacheKey(snapshot.dateKey));
+    if (!cached) {
+      return new Set();
+    }
+
+    try {
+      const parsed = JSON.parse(cached);
+      const picks = Array.isArray(parsed?.picks)
+        ? parsed.picks.map(normalizePostMarketPick)
+        : [];
+      if (!picks.length) {
+        return new Set();
+      }
+
+      dailySets.push(
+        new Set(
+          picks
+            .map((pick) => pick?.code)
+            .filter((code) => typeof code === "string" && code)
+        )
+      );
+    } catch {
+      return new Set();
+    }
+  }
+
+  if (!dailySets.length) {
+    return new Set();
+  }
+
+  const [firstSet, ...restSets] = dailySets;
+  return new Set(
+    [...firstSet].filter((code) => restSets.every((set) => set.has(code)))
+  );
+}
+
+async function decoratePostMarketPicksPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return payload;
+  }
+
+  const normalizedPicks = Array.isArray(payload.picks)
+    ? payload.picks.map(normalizePostMarketPick)
+    : [];
+  const streakCodes = await getRecentPostMarketStreakCodes(3);
+
+  return {
+    ...payload,
+    picks: normalizedPicks.map((pick) => ({
+      ...pick,
+      streak3d: streakCodes.has(pick.code),
+    })),
+  };
+}
+
 function formatPostMarketPicksText(dateKey, picks) {
   if (!Array.isArray(picks) || !picks.length) {
     return `📌 今日盤後選股（${dateKey}）\n目前沒有符合條件的標的。`;
@@ -2612,7 +2680,11 @@ function formatPostMarketPicksText(dateKey, picks) {
 
   picks.map(normalizePostMarketPick).forEach((pick, index) => {
     lines.push("");
-    lines.push(`${index + 1}. ${pick.code} ${pick.name}`);
+    lines.push(
+      `${index + 1}. ${pick.code} ${pick.name}${
+        pick.streak3d ? "【3日中選】" : ""
+      }`
+    );
     lines.push(
       `收盤 ${fmtTWPrice(pick.close)}｜5日 ${pick.change5d.toFixed(
         1
@@ -2772,18 +2844,18 @@ async function getOrBuildPostMarketPicks() {
   if (cached) {
     try {
       const parsed = JSON.parse(cached);
-      return {
+      return decoratePostMarketPicksPayload({
         ...parsed,
         picks: Array.isArray(parsed?.picks)
           ? parsed.picks.map(normalizePostMarketPick)
           : [],
-      };
+      });
     } catch {
       // ignore and rebuild
     }
   }
 
-  return computePostMarketPicks();
+  return decoratePostMarketPicksPayload(await computePostMarketPicks());
 }
 
 async function findStock(query) {
