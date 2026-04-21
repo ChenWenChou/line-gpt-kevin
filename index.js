@@ -1939,6 +1939,24 @@ function buildWeatherFlex({
     mode === "current"
       ? `☔ ${rainLabel || `短時降雨機率 ${rainPercent}%`}`
       : `☔ 降雨機率 ${rainPercent}%`;
+  const detailContents = [
+    {
+      type: "text",
+      text: temperatureText,
+    },
+  ];
+
+  if (humidity !== null && humidity !== undefined && humidity !== "NA") {
+    detailContents.push({
+      type: "text",
+      text: `💧 濕度 ${humidity}%`,
+    });
+  }
+
+  detailContents.push({
+    type: "text",
+    text: rainText,
+  });
   return {
     type: "flex",
     altText: `${city}${whenLabel}天氣`,
@@ -1978,20 +1996,7 @@ function buildWeatherFlex({
             type: "box",
             layout: "vertical",
             spacing: "sm",
-            contents: [
-              {
-                type: "text",
-                text: temperatureText,
-              },
-              {
-                type: "text",
-                text: `💧 濕度 ${humidity}%`,
-              },
-              {
-                type: "text",
-                text: rainText,
-              },
-            ],
+            contents: detailContents,
           },
           {
             type: "separator",
@@ -2228,7 +2233,7 @@ async function getWeatherAndOutfit({
               : `${cwaSummary.feelsMin.toFixed(1)}～${cwaSummary.feelsMax.toFixed(1)}`
             : "--";
         const humidity =
-          cwaSummary.humidityAvg != null ? Math.round(cwaSummary.humidityAvg) : "NA";
+          cwaSummary.humidityAvg != null ? Math.round(cwaSummary.humidityAvg) : null;
         const rainPercent =
           cwaSummary.maxPop != null ? cwaSummary.maxPop : 0;
         const outfitText = [decision.clothingAdvice, decision.umbrellaAdvice]
@@ -2319,7 +2324,7 @@ async function getWeatherAndOutfit({
           : `${summary.feelsMin.toFixed(1)}～${summary.feelsMax.toFixed(1)}`
         : "--";
     const humidity =
-      summary.humidityAvg != null ? Math.round(summary.humidityAvg) : "NA";
+      summary.humidityAvg != null ? Math.round(summary.humidityAvg) : null;
     const rainPercent = summary.maxPop != null ? summary.maxPop : 0;
     const outfitText = [decision.clothingAdvice, decision.umbrellaAdvice]
       .filter(Boolean)
