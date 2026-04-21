@@ -2588,6 +2588,21 @@ function buildPostMarketHoldingStyle(metrics) {
   return "短線觀察";
 }
 
+function normalizePostMarketPick(pick) {
+  if (!pick || typeof pick !== "object") return pick;
+  if (pick.holdingStyle) return pick;
+
+  return {
+    ...pick,
+    holdingStyle: buildPostMarketHoldingStyle({
+      change5d: pick.change5d,
+      change20d: pick.change20d,
+      volumeRatio: pick.volumeRatio,
+      bias20: pick.bias20,
+    }),
+  };
+}
+
 function formatPostMarketPicksText(dateKey, picks) {
   if (!Array.isArray(picks) || !picks.length) {
     return `📌 今日盤後選股（${dateKey}）\n目前沒有符合條件的標的。`;
@@ -2595,7 +2610,7 @@ function formatPostMarketPicksText(dateKey, picks) {
 
   const lines = [`📌 今日盤後選股（${dateKey}）`];
 
-  picks.forEach((pick, index) => {
+  picks.map(normalizePostMarketPick).forEach((pick, index) => {
     lines.push("");
     lines.push(`${index + 1}. ${pick.code} ${pick.name}`);
     lines.push(
@@ -2756,7 +2771,13 @@ async function getOrBuildPostMarketPicks() {
   const cached = await redisGet(getPostMarketPicksCacheKey(latestDateKey));
   if (cached) {
     try {
-      return JSON.parse(cached);
+      const parsed = JSON.parse(cached);
+      return {
+        ...parsed,
+        picks: Array.isArray(parsed?.picks)
+          ? parsed.picks.map(normalizePostMarketPick)
+          : [],
+      };
     } catch {
       // ignore and rebuild
     }
