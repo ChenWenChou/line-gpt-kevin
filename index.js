@@ -1205,8 +1205,61 @@ function parseWeatherQueryType(text = "") {
   return { queryType: "weather", matchedText: null };
 }
 
+function resolveTaiwanDistrict(text = "") {
+  const input = String(text || "").trim();
+  if (!input) return null;
+
+  const keys = Object.keys(TW_DISTRICT_ALIAS_MAP).sort((a, b) => b.length - a.length);
+  for (const key of keys) {
+    if (!input.includes(key)) continue;
+
+    const matched = TW_DISTRICT_ALIAS_MAP[key];
+    if (!matched) continue;
+    if (AMBIGUOUS_DISTRICT_ALIASES.has(key)) {
+      const countyHints = [matched.countyName, matched.displayName].filter(Boolean);
+      const hasCountyHint = countyHints.some((hint) => input.includes(hint));
+      if (!hasCountyHint) continue;
+    }
+    return {
+      input: key,
+      displayName: matched.displayName,
+      countyName: matched.countyName,
+      districtName: matched.displayName,
+      cwaLocationName: matched.countyName,
+      matchedLevel: "district",
+    };
+  }
+
+  return null;
+}
+
+function resolveTaiwanWeatherLocation(text = "") {
+  const input = String(text || "").trim();
+  if (!input) return null;
+
+  const district = resolveTaiwanDistrict(input);
+  if (district) return district;
+
+  for (const [key, countyName] of Object.entries(CWA_LOCATION_MAP)) {
+    if (!input.includes(key)) continue;
+    return {
+      input: key,
+      displayName: countyName,
+      countyName,
+      districtName: null,
+      cwaLocationName: countyName,
+      matchedLevel: "county",
+    };
+  }
+
+  return null;
+}
+
 function parseWeatherLocationText(text = "") {
   const t = String(text || "").trim();
+  const taiwanLocation = resolveTaiwanWeatherLocation(t);
+  if (taiwanLocation) return taiwanLocation.displayName;
+
   const twMatch = TW_WEATHER_LOCATIONS.find((location) => t.includes(location));
   if (twMatch) return twMatch;
 
@@ -1234,12 +1287,14 @@ function parseWeatherRequest(text = "") {
   const { timeIntent } = parseWeatherTimeIntent(rawText);
   const { queryType } = parseWeatherQueryType(rawText);
   const locationText = parseWeatherLocationText(rawText);
+  const resolvedLocation = resolveTaiwanWeatherLocation(rawText);
 
   return {
     rawText,
     locationText,
     timeIntent,
     queryType,
+    resolvedLocation,
   };
 }
 
@@ -1646,6 +1701,157 @@ const CWA_LOCATION_MAP = {
   北竿: "連江縣",
   東引: "連江縣",
 };
+const TW_DISTRICT_ALIAS_MAP = {
+  中正: { displayName: "中正區", countyName: "臺北市" },
+  大同: { displayName: "大同區", countyName: "臺北市" },
+  中山: { displayName: "中山區", countyName: "臺北市" },
+  松山: { displayName: "松山區", countyName: "臺北市" },
+  大安: { displayName: "大安區", countyName: "臺北市" },
+  萬華: { displayName: "萬華區", countyName: "臺北市" },
+  信義: { displayName: "信義區", countyName: "臺北市" },
+  士林: { displayName: "士林區", countyName: "臺北市" },
+  北投: { displayName: "北投區", countyName: "臺北市" },
+  內湖: { displayName: "內湖區", countyName: "臺北市" },
+  南港: { displayName: "南港區", countyName: "臺北市" },
+  文山: { displayName: "文山區", countyName: "臺北市" },
+  板橋: { displayName: "板橋區", countyName: "新北市" },
+  新莊: { displayName: "新莊區", countyName: "新北市" },
+  中和: { displayName: "中和區", countyName: "新北市" },
+  永和: { displayName: "永和區", countyName: "新北市" },
+  三重: { displayName: "三重區", countyName: "新北市" },
+  新店: { displayName: "新店區", countyName: "新北市" },
+  土城: { displayName: "土城區", countyName: "新北市" },
+  樹林: { displayName: "樹林區", countyName: "新北市" },
+  鶯歌: { displayName: "鶯歌區", countyName: "新北市" },
+  三峽: { displayName: "三峽區", countyName: "新北市" },
+  淡水: { displayName: "淡水區", countyName: "新北市" },
+  汐止: { displayName: "汐止區", countyName: "新北市" },
+  瑞芳: { displayName: "瑞芳區", countyName: "新北市" },
+  林口: { displayName: "林口區", countyName: "新北市" },
+  五股: { displayName: "五股區", countyName: "新北市" },
+  泰山: { displayName: "泰山區", countyName: "新北市" },
+  蘆洲: { displayName: "蘆洲區", countyName: "新北市" },
+  八里: { displayName: "八里區", countyName: "新北市" },
+  三芝: { displayName: "三芝區", countyName: "新北市" },
+  石門: { displayName: "石門區", countyName: "新北市" },
+  中壢: { displayName: "中壢區", countyName: "桃園市" },
+  平鎮: { displayName: "平鎮區", countyName: "桃園市" },
+  龜山: { displayName: "龜山區", countyName: "桃園市" },
+  八德: { displayName: "八德區", countyName: "桃園市" },
+  蘆竹: { displayName: "蘆竹區", countyName: "桃園市" },
+  大園: { displayName: "大園區", countyName: "桃園市" },
+  楊梅: { displayName: "楊梅區", countyName: "桃園市" },
+  龍潭: { displayName: "龍潭區", countyName: "桃園市" },
+  大溪: { displayName: "大溪區", countyName: "桃園市" },
+  觀音: { displayName: "觀音區", countyName: "桃園市" },
+  復興: { displayName: "復興區", countyName: "桃園市" },
+  東區: { displayName: "東區", countyName: "新竹市" },
+  北區: { displayName: "北區", countyName: "新竹市" },
+  香山: { displayName: "香山區", countyName: "新竹市" },
+  竹北: { displayName: "竹北市", countyName: "新竹縣" },
+  竹東: { displayName: "竹東鎮", countyName: "新竹縣" },
+  湖口: { displayName: "湖口鄉", countyName: "新竹縣" },
+  新豐: { displayName: "新豐鄉", countyName: "新竹縣" },
+  新埔: { displayName: "新埔鎮", countyName: "新竹縣" },
+  關西: { displayName: "關西鎮", countyName: "新竹縣" },
+  芎林: { displayName: "芎林鄉", countyName: "新竹縣" },
+  竹南: { displayName: "竹南鎮", countyName: "苗栗縣" },
+  頭份: { displayName: "頭份市", countyName: "苗栗縣" },
+  苗栗市: { displayName: "苗栗市", countyName: "苗栗縣" },
+  苗栗: { displayName: "苗栗市", countyName: "苗栗縣" },
+  豐原: { displayName: "豐原區", countyName: "臺中市" },
+  東勢: { displayName: "東勢區", countyName: "臺中市" },
+  大甲: { displayName: "大甲區", countyName: "臺中市" },
+  清水: { displayName: "清水區", countyName: "臺中市" },
+  沙鹿: { displayName: "沙鹿區", countyName: "臺中市" },
+  梧棲: { displayName: "梧棲區", countyName: "臺中市" },
+  后里: { displayName: "后里區", countyName: "臺中市" },
+  神岡: { displayName: "神岡區", countyName: "臺中市" },
+  潭子: { displayName: "潭子區", countyName: "臺中市" },
+  大雅: { displayName: "大雅區", countyName: "臺中市" },
+  新社: { displayName: "新社區", countyName: "臺中市" },
+  石岡: { displayName: "石岡區", countyName: "臺中市" },
+  外埔: { displayName: "外埔區", countyName: "臺中市" },
+  大安區台中: { displayName: "大安區", countyName: "臺中市" },
+  烏日: { displayName: "烏日區", countyName: "臺中市" },
+  大肚: { displayName: "大肚區", countyName: "臺中市" },
+  龍井: { displayName: "龍井區", countyName: "臺中市" },
+  霧峰: { displayName: "霧峰區", countyName: "臺中市" },
+  太平: { displayName: "太平區", countyName: "臺中市" },
+  大里: { displayName: "大里區", countyName: "臺中市" },
+  和平: { displayName: "和平區", countyName: "臺中市" },
+  西屯: { displayName: "西屯區", countyName: "臺中市" },
+  南屯: { displayName: "南屯區", countyName: "臺中市" },
+  北屯: { displayName: "北屯區", countyName: "臺中市" },
+  彰化市: { displayName: "彰化市", countyName: "彰化縣" },
+  彰化: { displayName: "彰化市", countyName: "彰化縣" },
+  員林: { displayName: "員林市", countyName: "彰化縣" },
+  鹿港: { displayName: "鹿港鎮", countyName: "彰化縣" },
+  和美: { displayName: "和美鎮", countyName: "彰化縣" },
+  溪湖: { displayName: "溪湖鎮", countyName: "彰化縣" },
+  埔心: { displayName: "埔心鄉", countyName: "彰化縣" },
+  埔鹽: { displayName: "埔鹽鄉", countyName: "彰化縣" },
+  埔里: { displayName: "埔里鎮", countyName: "南投縣" },
+  南投市: { displayName: "南投市", countyName: "南投縣" },
+  南投: { displayName: "南投市", countyName: "南投縣" },
+  草屯: { displayName: "草屯鎮", countyName: "南投縣" },
+  斗六: { displayName: "斗六市", countyName: "雲林縣" },
+  斗南: { displayName: "斗南鎮", countyName: "雲林縣" },
+  虎尾: { displayName: "虎尾鎮", countyName: "雲林縣" },
+  北港: { displayName: "北港鎮", countyName: "雲林縣" },
+  嘉義市: { displayName: "嘉義市", countyName: "嘉義市" },
+  嘉義: { displayName: "嘉義市", countyName: "嘉義市" },
+  太保: { displayName: "太保市", countyName: "嘉義縣" },
+  朴子: { displayName: "朴子市", countyName: "嘉義縣" },
+  民雄: { displayName: "民雄鄉", countyName: "嘉義縣" },
+  東區台南: { displayName: "東區", countyName: "臺南市" },
+  南區台南: { displayName: "南區", countyName: "臺南市" },
+  北區台南: { displayName: "北區", countyName: "臺南市" },
+  安平: { displayName: "安平區", countyName: "臺南市" },
+  安南: { displayName: "安南區", countyName: "臺南市" },
+  永康: { displayName: "永康區", countyName: "臺南市" },
+  歸仁: { displayName: "歸仁區", countyName: "臺南市" },
+  仁德: { displayName: "仁德區", countyName: "臺南市" },
+  新營: { displayName: "新營區", countyName: "臺南市" },
+  善化: { displayName: "善化區", countyName: "臺南市" },
+  新市: { displayName: "新市區", countyName: "臺南市" },
+  三民: { displayName: "三民區", countyName: "高雄市" },
+  左營: { displayName: "左營區", countyName: "高雄市" },
+  楠梓: { displayName: "楠梓區", countyName: "高雄市" },
+  鼓山: { displayName: "鼓山區", countyName: "高雄市" },
+  苓雅: { displayName: "苓雅區", countyName: "高雄市" },
+  前鎮: { displayName: "前鎮區", countyName: "高雄市" },
+  小港: { displayName: "小港區", countyName: "高雄市" },
+  鳳山: { displayName: "鳳山區", countyName: "高雄市" },
+  岡山: { displayName: "岡山區", countyName: "高雄市" },
+  橋頭: { displayName: "橋頭區", countyName: "高雄市" },
+  大寮: { displayName: "大寮區", countyName: "高雄市" },
+  羅東: { displayName: "羅東鎮", countyName: "宜蘭縣" },
+  礁溪: { displayName: "礁溪鄉", countyName: "宜蘭縣" },
+  宜蘭市: { displayName: "宜蘭市", countyName: "宜蘭縣" },
+  宜蘭: { displayName: "宜蘭市", countyName: "宜蘭縣" },
+  蘇澳: { displayName: "蘇澳鎮", countyName: "宜蘭縣" },
+  花蓮市: { displayName: "花蓮市", countyName: "花蓮縣" },
+  花蓮: { displayName: "花蓮市", countyName: "花蓮縣" },
+  吉安: { displayName: "吉安鄉", countyName: "花蓮縣" },
+  臺東市: { displayName: "臺東市", countyName: "臺東縣" },
+  台東市: { displayName: "臺東市", countyName: "臺東縣" },
+  台東: { displayName: "臺東市", countyName: "臺東縣" },
+  臺東: { displayName: "臺東市", countyName: "臺東縣" },
+  屏東市: { displayName: "屏東市", countyName: "屏東縣" },
+  屏東: { displayName: "屏東市", countyName: "屏東縣" },
+};
+const AMBIGUOUS_DISTRICT_ALIASES = new Set([
+  "中正",
+  "大同",
+  "中山",
+  "信義",
+  "東區",
+  "西區",
+  "南區",
+  "北區",
+  "和平",
+]);
 
 function findTaiwanIsland(raw) {
   if (!raw) return null;
@@ -1819,7 +2025,7 @@ function shouldShowFeelsLike(tempValue, feelsValue) {
   return Math.abs(feelsValue - tempValue) >= 0.5;
 }
 
-async function fetchCwaCurrentObservation(locationText) {
+async function fetchCwaCurrentObservation(locationText, resolvedLocation = null) {
   if (!CWA_API_KEY || !locationText) return null;
 
   const url = `https://opendata.cwa.gov.tw/api/v1/rest/datastore/O-A0003-001?Authorization=${encodeURIComponent(
@@ -1838,7 +2044,14 @@ async function fetchCwaCurrentObservation(locationText) {
     : [];
   if (!stations.length) return null;
 
-  const variants = getCwaLocationVariants(locationText);
+  const variants = getCwaLocationVariants(
+    resolvedLocation?.countyName || locationText
+  );
+  const districtVariants = resolvedLocation?.districtName
+    ? [resolvedLocation.districtName, String(resolvedLocation.input || "")]
+        .filter(Boolean)
+        .map((text) => text.replace(/[區鎮鄉市]$/g, ""))
+    : [];
   const scored = stations
     .map((station) => {
       const geo = station?.GeoInfo || station?.geoInfo || {};
@@ -1851,6 +2064,13 @@ async function fetchCwaCurrentObservation(locationText) {
 
       if (variants.some((v) => county.includes(v) || v.includes(county))) score += 4;
       if (variants.some((v) => town.includes(v) || v.includes(town))) score += 3;
+      if (
+        districtVariants.some((v) =>
+          v ? town.replace(/[區鎮鄉市]$/g, "").includes(v) : false
+        )
+      ) {
+        score += 5;
+      }
       if (variants.some((v) => stationName.includes(v) || v.includes(stationName))) {
         score += 2;
       }
@@ -2135,6 +2355,7 @@ async function getWeatherAndOutfit({
   rawText = "",
   timeIntent,
   queryType,
+  resolvedLocation,
 } = {}) {
   const apiKey = process.env.WEATHER_API_KEY;
   if (!apiKey && !CWA_API_KEY) {
@@ -2143,6 +2364,8 @@ async function getWeatherAndOutfit({
 
   try {
     const parsedRequest = rawText ? parseWeatherRequest(rawText) : null;
+    const resolvedTaiwanLocation =
+      resolvedLocation || parsedRequest?.resolvedLocation || null;
     const resolvedTimeIntent =
       timeIntent ||
       parsedRequest?.timeIntent ||
@@ -2154,14 +2377,20 @@ async function getWeatherAndOutfit({
     const resolvedQueryType =
       queryType || parsedRequest?.queryType || "weather";
     const requestedLocation =
-      parsedRequest?.locationText || address || city || "Taipei";
+      resolvedTaiwanLocation?.displayName ||
+      parsedRequest?.locationText ||
+      address ||
+      city ||
+      "Taipei";
 
     let resolvedCity = requestedLocation;
     let resolvedLat = lat;
     let resolvedLon = lon;
 
     const isTW = isTaiwanLocation(requestedLocation);
-    const cwaLocationName = normalizeCwaLocationName(requestedLocation);
+    const cwaLocationName =
+      resolvedTaiwanLocation?.cwaLocationName ||
+      normalizeCwaLocationName(requestedLocation);
     const cwaSupportsIntent = ["now", "today", "tonight", "tomorrow"].includes(
       resolvedTimeIntent
     );
@@ -2175,7 +2404,10 @@ async function getWeatherAndOutfit({
     }
 
     if (!resolvedLat || !resolvedLon) {
-      const geo = await geocodeCity(requestedLocation, apiKey);
+      const geo = await geocodeCity(
+        resolvedTaiwanLocation?.countyName || requestedLocation,
+        apiKey
+      );
       if (!geo) {
         // 無法 geocode，改用城市名稱直接查 forecast（預設國家為台灣）
         resolvedCity = requestedLocation;
@@ -2189,7 +2421,10 @@ async function getWeatherAndOutfit({
     if (isTW && CWA_API_KEY && cwaSupportsIntent) {
       const cwaSummary =
         resolvedTimeIntent === "now"
-          ? await fetchCwaCurrentObservation(cwaLocationName)
+          ? await fetchCwaCurrentObservation(
+              cwaLocationName,
+              resolvedTaiwanLocation
+            )
           : await (async () => {
               const forecastJson = await fetchCwa36HourForecast(cwaLocationName);
               const locationData = forecastJson?.records?.location?.[0];
@@ -2201,6 +2436,8 @@ async function getWeatherAndOutfit({
       if (cwaSummary) {
         const locationLabel = address
           ? `${address}（座標）`
+          : resolvedTaiwanLocation?.matchedLevel === "district"
+          ? `${resolvedTaiwanLocation.displayName}（${resolvedTaiwanLocation.countyName}）`
           : cwaLocationName || resolvedCity || requestedLocation || "未命名地點";
         const request = {
           rawText,
@@ -2301,6 +2538,8 @@ async function getWeatherAndOutfit({
     const summary = buildForecastSummaryFromSlots(slots);
     const locationLabel = address
       ? `${address}（座標）`
+      : resolvedTaiwanLocation?.matchedLevel === "district"
+      ? `${resolvedTaiwanLocation.displayName}（${resolvedTaiwanLocation.countyName}）`
       : resolvedCity || requestedLocation || "未命名地點";
     const request = {
       rawText,
@@ -5873,6 +6112,7 @@ ${sourceNote}`;
             when,
             lat: last.lat,
             lon: last.lon,
+            resolvedLocation: last.resolvedLocation,
           });
 
           await replyWeather(event, result);
@@ -5905,6 +6145,7 @@ ${sourceNote}`;
           timeIntent: directWeatherRequest.timeIntent,
           queryType: directWeatherRequest.queryType,
           rawText: parsedMessage,
+          resolvedLocation: directWeatherRequest.resolvedLocation || last?.resolvedLocation,
           lat: directWeatherRequest.locationText ? island?.lat : last?.lat || island?.lat,
           lon: directWeatherRequest.locationText ? island?.lon : last?.lon || island?.lon,
         });
@@ -5913,6 +6154,8 @@ ${sourceNote}`;
           city,
           lat: directWeatherRequest.locationText ? island?.lat : last?.lat || island?.lat,
           lon: directWeatherRequest.locationText ? island?.lon : last?.lon || island?.lon,
+          resolvedLocation:
+            directWeatherRequest.resolvedLocation || last?.resolvedLocation || null,
         });
 
         await replyWeather(event, result);
