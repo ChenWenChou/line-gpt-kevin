@@ -3001,10 +3001,9 @@ const TPEX_BASIC_INFO_CSV_URL =
   "https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv";
 const TWSE_EPS_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap14_L.csv";
 const TPEX_EPS_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap14_O.csv";
-const TWSE_PE_CSV_URL =
-  "https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=csv&selectType=ALL";
-const TPEX_PE_CSV_URL =
-  "https://www.tpex.org.tw/www/zh-tw/afterTrading/peratio_analysis?response=json";
+const TWSE_PE_JSON_URL = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_d";
+const TPEX_PE_HTML_URL =
+  "https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=htm";
 const MIN_TWSE_STOCK_COUNT = 500;
 const MIN_TPEX_STOCK_COUNT = 300;
 const STOCK_QUOTE_TIMEOUT_MS = Number(process.env.STOCK_QUOTE_TIMEOUT_MS || 6000);
@@ -3553,22 +3552,87 @@ function parseTwsePeCsv(text) {
   return stocks;
 }
 
-function parseTpexPeJson(payload) {
-  const rows = payload?.tables?.[0]?.data;
-  const fields = payload?.tables?.[0]?.fields;
-  if (!Array.isArray(rows) || !Array.isArray(fields)) return {};
+function decodeHtmlEntities(text) {
+  return String(text || "")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
+}
 
-  const codeIndex = fields.findIndex((c) => c.includes("股票代號") || c.includes("代號"));
-  const nameIndex = fields.findIndex((c) => c.includes("名稱"));
-  const peIndex = fields.findIndex((c) => c.includes("本益比"));
-  if (codeIndex < 0 || nameIndex < 0 || peIndex < 0) return {};
+function stripHtmlToText(html) {
+  return decodeHtmlEntities(
+    String(html || "")
+      .replace(/<br\s*\/?>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
+}
 
+function parseTwsePeOpenApi(items) {
   const stocks = {};
-  for (const row of rows) {
-    const code = normalizeStockCode(row?.[codeIndex]);
-    const name = String(row?.[nameIndex] || "").trim();
-    const peRatio = normalizeEpsValue(row?.[peIndex]);
+  if (!Array.isArray(items)) return stocks;
+
+  for (const item of items) {
+    const code =
+      item?.["證券代號"] ||
+      item?.["股票代號"] ||
+      item?.SecuritiesCompanyCode ||
+      item?.Code;
+    const name =
+      item?.["證券名稱"] ||
+      item?.["股票名稱"] ||
+      item?.SecuritiesCompanyName ||
+      item?.Name;
+    const peRatio = normalizeEpsValue(item?.["本益比"] || item?.PERatio || item?.PEratio);
+    if (!normalizeStockCode(code) || !String(name || "").trim() || peRatio == null) {
+      continue;
+    }
+    addStockRecord(stocks, {
+      code,
+      name,
+      market: "TWSE",
+      peRatio: Number(peRatio.toFixed(2)),
+    });
+  }
+
+  return stocks;
+}
+
+function parseTpexPeHtml(text) {
+  const rows = [...String(text || "").matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
+  const stocks = {};
+  let codeIndex = -1;
+  let nameIndex = -1;
+  let peIndex = -1;
+
+  for (const match of rows) {
+    const cells = [...match[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(
+      (cellMatch) => stripHtmlToText(cellMatch[1])
+    );
+    if (!cells.length) continue;
+
+    if (
+      cells.some((cell) => cell.includes("股票代號") || cell.includes("代號")) &&
+      cells.some((cell) => cell.includes("本益比"))
+    ) {
+      codeIndex = cells.findIndex((cell) => cell.includes("股票代號") || cell.includes("代號"));
+      nameIndex = cells.findIndex((cell) => cell.includes("名稱"));
+      peIndex = cells.findIndex((cell) => cell.includes("本益比"));
+      continue;
+    }
+
+    if (codeIndex < 0 || nameIndex < 0 || peIndex < 0) continue;
+    if (cells.length <= Math.max(codeIndex, nameIndex, peIndex)) continue;
+
+    const code = normalizeStockCode(cells[codeIndex]);
+    const name = String(cells[nameIndex] || "").trim();
+    const peRatio = normalizeEpsValue(cells[peIndex]);
     if (!code || !name || peRatio == null) continue;
+
     addStockRecord(stocks, {
       code,
       name,
@@ -3578,6 +3642,15 @@ function parseTpexPeJson(payload) {
   }
 
   return stocks;
+}
+
+async function fetchTextResponse(url, options = {}) {
+  const res = await fetch(url, options);
+  const contentType = res.headers.get("content-type") || "";
+  const arrayBuffer = await res.arrayBuffer();
+  const bytes = new Uint8Array(arrayBuffer);
+  const utf8Text = new TextDecoder("utf-8").decode(bytes);
+  return { res, contentType, bytes, text: utf8Text };
 }
 
 async function fetchStockIndustryCsv(url, market, sourceLabel) {
@@ -3625,43 +3698,39 @@ async function fetchStockEpsCsv(url, market, sourceLabel) {
 }
 
 async function fetchTwsePeCsv() {
-  const res = await fetch(TWSE_PE_CSV_URL, {
-    headers: {
-      "user-agent": "Mozilla/5.0",
-      accept: "text/csv,*/*;q=0.8",
-    },
-  });
-  const contentType = res.headers.get("content-type") || "";
-  const text = await res.text();
-  const looksLikeHTML = /<html|<!doctype html|頁面無法執行/i.test(text);
-  if (!res.ok || looksLikeHTML) {
-    throw new Error(`twse-pe unavailable: ${res.status}`);
-  }
-  return {
-    contentType,
-    head120: text.slice(0, 120),
-    stocks: parseTwsePeCsv(text),
-  };
-}
-
-async function fetchTpexPeJson() {
-  const res = await fetch(TPEX_PE_CSV_URL, {
+  const res = await fetch(TWSE_PE_JSON_URL, {
     headers: {
       "user-agent": "Mozilla/5.0",
       accept: "application/json,*/*;q=0.8",
     },
   });
   const contentType = res.headers.get("content-type") || "";
-  const text = await res.text();
+  const items = await res.json();
+  if (!res.ok || !Array.isArray(items)) {
+    throw new Error(`twse-pe unavailable: ${res.status}`);
+  }
+  return {
+    contentType,
+    head120: JSON.stringify(items).slice(0, 120),
+    stocks: parseTwsePeOpenApi(items),
+  };
+}
+
+async function fetchTpexPeJson() {
+  const { res, contentType, text } = await fetchTextResponse(TPEX_PE_HTML_URL, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+    },
+  });
   const looksLikeHTML = /<html|<!doctype html|頁面無法執行/i.test(text);
-  if (!res.ok || looksLikeHTML) {
+  if (!res.ok || !looksLikeHTML) {
     throw new Error(`tpex-pe unavailable: ${res.status}`);
   }
-  const payload = JSON.parse(text);
   return {
     contentType,
     head120: text.slice(0, 120),
-    stocks: parseTpexPeJson(payload),
+    stocks: parseTpexPeHtml(text),
   };
 }
 
