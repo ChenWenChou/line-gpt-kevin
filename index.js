@@ -3001,6 +3001,10 @@ const TPEX_BASIC_INFO_CSV_URL =
   "https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv";
 const TWSE_EPS_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap14_L.csv";
 const TPEX_EPS_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap14_O.csv";
+const TWSE_PE_CSV_URL =
+  "https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=csv&selectType=ALL";
+const TPEX_PE_CSV_URL =
+  "https://www.tpex.org.tw/www/zh-tw/afterTrading/peratio_analysis?response=json";
 const MIN_TWSE_STOCK_COUNT = 500;
 const MIN_TPEX_STOCK_COUNT = 300;
 const STOCK_QUOTE_TIMEOUT_MS = Number(process.env.STOCK_QUOTE_TIMEOUT_MS || 6000);
@@ -3040,6 +3044,12 @@ const POSTMARKET_HIGHRISK_REPLY_LIMIT = Number(
 );
 const POSTMARKET_MAX_PER_INDUSTRY = Number(
   process.env.POSTMARKET_MAX_PER_INDUSTRY || 2
+);
+const POSTMARKET_PE_RED_FLAG_THRESHOLD = Number(
+  process.env.POSTMARKET_PE_RED_FLAG_THRESHOLD || 40
+);
+const POSTMARKET_PE_LOW_LIQUIDITY_VALUE = Number(
+  process.env.POSTMARKET_PE_LOW_LIQUIDITY_VALUE || 2e8
 );
 const STOCK_INDUSTRY_NAME_MAP = {
   "01": "水泥工業",
@@ -3164,6 +3174,7 @@ function addStockRecord(
     epsTtm = null,
     epsTtmYear = null,
     epsTtmQuarter = null,
+    peRatio = null,
   }
 ) {
   const normalizedCode = normalizeStockCode(code);
@@ -3221,6 +3232,12 @@ function addStockRecord(
         ? Number(epsTtmQuarter)
         : Number.isFinite(current.epsTtmQuarter)
         ? Number(current.epsTtmQuarter)
+        : null,
+    peRatio:
+      typeof peRatio === "number" && Number.isFinite(peRatio)
+        ? peRatio
+        : typeof current.peRatio === "number" && Number.isFinite(current.peRatio)
+        ? current.peRatio
         : null,
   };
   return true;
@@ -3500,6 +3517,69 @@ function parseCompanyEpsCsv(text, market = "TWSE") {
   return { stocks, latestYear, latestQuarter };
 }
 
+function parseTwsePeCsv(text) {
+  const lines = String(text || "")
+    .split(/\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) return {};
+
+  const headerIndex = lines.findIndex(
+    (line) => line.includes("證券代號") && line.includes("本益比")
+  );
+  if (headerIndex < 0) return {};
+
+  const header = parseCsvLine(lines[headerIndex]);
+  const codeIndex = header.findIndex((c) => c.includes("證券代號"));
+  const nameIndex = header.findIndex((c) => c.includes("證券名稱"));
+  const peIndex = header.findIndex((c) => c.includes("本益比"));
+  if (codeIndex < 0 || nameIndex < 0 || peIndex < 0) return {};
+
+  const stocks = {};
+  for (let i = headerIndex + 1; i < lines.length; i++) {
+    const cols = parseCsvLine(lines[i]);
+    const code = normalizeStockCode(cols[codeIndex]);
+    const name = String(cols[nameIndex] || "").trim();
+    const peRatio = normalizeEpsValue(cols[peIndex]);
+    if (!code || !name || peRatio == null) continue;
+    addStockRecord(stocks, {
+      code,
+      name,
+      market: "TWSE",
+      peRatio: Number(peRatio.toFixed(2)),
+    });
+  }
+
+  return stocks;
+}
+
+function parseTpexPeJson(payload) {
+  const rows = payload?.tables?.[0]?.data;
+  const fields = payload?.tables?.[0]?.fields;
+  if (!Array.isArray(rows) || !Array.isArray(fields)) return {};
+
+  const codeIndex = fields.findIndex((c) => c.includes("股票代號") || c.includes("代號"));
+  const nameIndex = fields.findIndex((c) => c.includes("名稱"));
+  const peIndex = fields.findIndex((c) => c.includes("本益比"));
+  if (codeIndex < 0 || nameIndex < 0 || peIndex < 0) return {};
+
+  const stocks = {};
+  for (const row of rows) {
+    const code = normalizeStockCode(row?.[codeIndex]);
+    const name = String(row?.[nameIndex] || "").trim();
+    const peRatio = normalizeEpsValue(row?.[peIndex]);
+    if (!code || !name || peRatio == null) continue;
+    addStockRecord(stocks, {
+      code,
+      name,
+      market: "TPEX",
+      peRatio: Number(peRatio.toFixed(2)),
+    });
+  }
+
+  return stocks;
+}
+
 async function fetchStockIndustryCsv(url, market, sourceLabel) {
   const res = await fetch(url, {
     headers: {
@@ -3541,6 +3621,47 @@ async function fetchStockEpsCsv(url, market, sourceLabel) {
     contentType,
     head120: text.slice(0, 120),
     ...parseCompanyEpsCsv(text, market),
+  };
+}
+
+async function fetchTwsePeCsv() {
+  const res = await fetch(TWSE_PE_CSV_URL, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "text/csv,*/*;q=0.8",
+    },
+  });
+  const contentType = res.headers.get("content-type") || "";
+  const text = await res.text();
+  const looksLikeHTML = /<html|<!doctype html|頁面無法執行/i.test(text);
+  if (!res.ok || looksLikeHTML) {
+    throw new Error(`twse-pe unavailable: ${res.status}`);
+  }
+  return {
+    contentType,
+    head120: text.slice(0, 120),
+    stocks: parseTwsePeCsv(text),
+  };
+}
+
+async function fetchTpexPeJson() {
+  const res = await fetch(TPEX_PE_CSV_URL, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "application/json,*/*;q=0.8",
+    },
+  });
+  const contentType = res.headers.get("content-type") || "";
+  const text = await res.text();
+  const looksLikeHTML = /<html|<!doctype html|頁面無法執行/i.test(text);
+  if (!res.ok || looksLikeHTML) {
+    throw new Error(`tpex-pe unavailable: ${res.status}`);
+  }
+  const payload = JSON.parse(text);
+  return {
+    contentType,
+    head120: text.slice(0, 120),
+    stocks: parseTpexPeJson(payload),
   };
 }
 
@@ -3995,6 +4116,10 @@ function buildPostMarketTags(metrics) {
     tags.push("基本面偏弱");
   }
 
+  if (metrics.isValuationExpensive) {
+    tags.push("估值偏高");
+  }
+
   if (metrics.liquidityPass && metrics.volumeRatio >= 1.2) {
     tags.push("量能健康");
   }
@@ -4058,6 +4183,9 @@ function buildPostMarketStockStyleComment(metrics) {
 }
 
 function buildPostMarketPickComment(metrics) {
+  if (metrics.isFundamentallyWeak && metrics.isValuationExpensive) {
+    return "近四季 EPS 偏弱，且估值偏高，不列入主推薦。";
+  }
   if (metrics.isFundamentallyWeak && metrics.isOverheated) {
     return "近四季 EPS 偏弱，且短線已過熱，不列入主推薦。";
   }
@@ -4065,6 +4193,14 @@ function buildPostMarketPickComment(metrics) {
     return `${buildPostMarketStructureComment(
       metrics
     )}，但近四季 EPS 偏弱，先列高風險觀察。`;
+  }
+  if (metrics.isValuationExpensive && metrics.isOverheated) {
+    return "估值偏高，且短線已過熱，不列入主推薦。";
+  }
+  if (metrics.isValuationExpensive) {
+    return `${buildPostMarketStructureComment(
+      metrics
+    )}，但估值偏高，較不適合列主推薦。`;
   }
   if (metrics.isOverheated && metrics.isWeakLiquidity) {
     return "短線已過熱，且流動性不足，不列入主推薦";
@@ -4121,6 +4257,10 @@ function normalizePostMarketPick(pick) {
     Number.isFinite(pick.epsLatestQuarter)
       ? pick.epsLatestQuarter
       : null;
+  const peRatio =
+    typeof pick.peRatio === "number" && Number.isFinite(pick.peRatio)
+      ? pick.peRatio
+      : null;
   const epsTtm =
     typeof pick.epsTtm === "number" && Number.isFinite(pick.epsTtm)
       ? pick.epsTtm
@@ -4149,6 +4289,12 @@ function normalizePostMarketPick(pick) {
     typeof pick.isFundamentallyWeak === "boolean"
       ? pick.isFundamentallyWeak
       : typeof epsTtm === "number" && epsTtm <= 0;
+  const isValuationExpensive =
+    typeof pick.isValuationExpensive === "boolean"
+      ? pick.isValuationExpensive
+      : typeof peRatio === "number" &&
+        peRatio > POSTMARKET_PE_RED_FLAG_THRESHOLD &&
+        tradeValue < POSTMARKET_PE_LOW_LIQUIDITY_VALUE;
   const normalizedLegacyRiskLevel =
     pick.riskLevel === "低風險"
       ? "型態剛轉強"
@@ -4178,16 +4324,19 @@ function normalizePostMarketPick(pick) {
         bias20,
         tradeValue,
         avgVol20,
+        peRatio,
         consecutiveUpDays,
         liquidityPass,
         isWeakLiquidity,
         isOverheated,
         isFundamentallyWeak,
+        isValuationExpensive,
       });
 
   return {
     ...pick,
     industry: normalizeIndustryName(pick.industry),
+    peRatio,
     epsLatestQuarter,
     epsYear: Number.isFinite(pick.epsYear) ? Number(pick.epsYear) : null,
     epsQuarter: Number.isFinite(pick.epsQuarter) ? Number(pick.epsQuarter) : null,
@@ -4205,6 +4354,7 @@ function normalizePostMarketPick(pick) {
     isWeakLiquidity,
     isOverheated,
     isFundamentallyWeak,
+    isValuationExpensive,
     riskLevel,
     tags,
     comment:
@@ -4215,11 +4365,13 @@ function normalizePostMarketPick(pick) {
         bias20,
         tradeValue,
         avgVol20,
+        peRatio,
         consecutiveUpDays,
         liquidityPass,
         isWeakLiquidity,
         isOverheated,
         isFundamentallyWeak,
+        isValuationExpensive,
         riskLevel,
       }),
   };
@@ -4363,7 +4515,11 @@ function formatPostMarketPicksText(payload) {
       lines.push(
         `量比 ${pick.volumeRatio.toFixed(2)}｜20日均量 ${Math.round(
           pick.avgVol20
-        ).toLocaleString("zh-TW")}張｜成交額 ${fmtTradeValueYi(pick.tradeValue)}`
+        ).toLocaleString("zh-TW")}張｜成交額 ${fmtTradeValueYi(pick.tradeValue)}${
+          typeof pick.peRatio === "number" && Number.isFinite(pick.peRatio)
+            ? `｜本益比 ${pick.peRatio.toFixed(2)}`
+            : ""
+        }`
       );
       lines.push(`短評：${pick.comment}`);
     });
@@ -4393,7 +4549,11 @@ function formatPostMarketPicksText(payload) {
       lines.push(
         `量比 ${pick.volumeRatio.toFixed(2)}｜20日均量 ${Math.round(
           pick.avgVol20
-        ).toLocaleString("zh-TW")}張｜成交額 ${fmtTradeValueYi(pick.tradeValue)}`
+        ).toLocaleString("zh-TW")}張｜成交額 ${fmtTradeValueYi(pick.tradeValue)}${
+          typeof pick.peRatio === "number" && Number.isFinite(pick.peRatio)
+            ? `｜本益比 ${pick.peRatio.toFixed(2)}`
+            : ""
+        }`
       );
       lines.push(`短評：${pick.comment}`);
     });
@@ -4401,7 +4561,7 @@ function formatPostMarketPicksText(payload) {
 
   lines.push("");
   lines.push(
-    "條件：5~40元、5MA>20MA、站上20MA、5/20日漲幅為正、量能放大、排除ETF；主推薦另加流動性、過熱與近四季EPS過濾"
+    "條件：5~40元、5MA>20MA、站上20MA、5/20日漲幅為正、量能放大、排除ETF；主推薦另加流動性、過熱、近四季EPS與本益比紅燈過濾"
   );
   return lines.join("\n");
 }
@@ -4460,6 +4620,10 @@ async function computePostMarketPicks() {
       Number.isFinite(stock.epsLatestQuarter)
         ? stock.epsLatestQuarter
         : null;
+    const peRatio =
+      typeof stock?.peRatio === "number" && Number.isFinite(stock.peRatio)
+        ? stock.peRatio
+        : null;
     const epsTtm =
       typeof stock?.epsTtm === "number" && Number.isFinite(stock.epsTtm)
         ? stock.epsTtm
@@ -4486,6 +4650,11 @@ async function computePostMarketPicks() {
       bias20 > 0.12;
     const isFundamentallyWeak =
       typeof epsTtm === "number" && Number.isFinite(epsTtm) && epsTtm <= 0;
+    const isValuationExpensive =
+      typeof peRatio === "number" &&
+      Number.isFinite(peRatio) &&
+      peRatio > POSTMARKET_PE_RED_FLAG_THRESHOLD &&
+      tradeValue < POSTMARKET_PE_LOW_LIQUIDITY_VALUE;
 
     if (close < 5 || close > 40) continue;
     if (!(ma5 > ma20)) continue;
@@ -4518,6 +4687,7 @@ async function computePostMarketPicks() {
       volumeRatio,
       avgVol20,
       tradeValue,
+      peRatio,
       bias5,
       bias20,
       consecutiveUpDays,
@@ -4525,6 +4695,7 @@ async function computePostMarketPicks() {
       isWeakLiquidity,
       isOverheated,
       isFundamentallyWeak,
+      isValuationExpensive,
       riskLevel,
     };
     const candidate = {
@@ -4532,6 +4703,7 @@ async function computePostMarketPicks() {
       name: stock.name,
       market: stock.market,
       industry: stock.industry || null,
+      peRatio,
       epsLatestQuarter,
       epsYear:
         Number.isFinite(stock?.epsYear) && stock.epsYear > 0
@@ -4566,13 +4738,19 @@ async function computePostMarketPicks() {
       isWeakLiquidity,
       isOverheated,
       isFundamentallyWeak,
+      isValuationExpensive,
       riskLevel,
       tags: buildPostMarketTags(metrics),
       comment: buildPostMarketPickComment(metrics),
       ...score,
     };
 
-    if (liquidityPass && !isOverheated && !isFundamentallyWeak) {
+    if (
+      liquidityPass &&
+      !isOverheated &&
+      !isFundamentallyWeak &&
+      !isValuationExpensive
+    ) {
       recommendedCandidates.push(candidate);
     } else {
       highRiskCandidates.push({
@@ -6866,6 +7044,8 @@ app.get("/api/update-stocks", async (req, res) => {
   let tpexEpsCount = 0;
   let twseEpsTtmCount = 0;
   let tpexEpsTtmCount = 0;
+  let twsePeCount = 0;
+  let tpexPeCount = 0;
 
   try {
     const r = await fetch(TWSE_STOCKS_OPENAPI_URL, {
@@ -7182,6 +7362,60 @@ app.get("/api/update-stocks", async (req, res) => {
     });
   }
 
+  try {
+    const result = await fetchTwsePeCsv();
+    twsePeCount = Object.keys(result.stocks).length;
+    debug.push({
+      source: "twse-pe",
+      status: 200,
+      contentType: result.contentType,
+      count: twsePeCount,
+      head120: result.head120,
+    });
+    Object.entries(result.stocks).forEach(([code, info]) => {
+      if (stocks[code]) {
+        stocks[code].peRatio =
+          typeof info.peRatio === "number" && Number.isFinite(info.peRatio)
+            ? info.peRatio
+            : stocks[code].peRatio ?? null;
+      }
+    });
+    source = source ? `${source}+twse-pe` : "twse-pe";
+  } catch (err) {
+    console.warn("TWSE PE update failed:", err?.message || err);
+    debug.push({
+      source: "twse-pe",
+      error: String(err?.message || err),
+    });
+  }
+
+  try {
+    const result = await fetchTpexPeJson();
+    tpexPeCount = Object.keys(result.stocks).length;
+    debug.push({
+      source: "tpex-pe",
+      status: 200,
+      contentType: result.contentType,
+      count: tpexPeCount,
+      head120: result.head120,
+    });
+    Object.entries(result.stocks).forEach(([code, info]) => {
+      if (stocks[code]) {
+        stocks[code].peRatio =
+          typeof info.peRatio === "number" && Number.isFinite(info.peRatio)
+            ? info.peRatio
+            : stocks[code].peRatio ?? null;
+      }
+    });
+    source = source ? `${source}+tpex-pe` : "tpex-pe";
+  } catch (err) {
+    console.warn("TPEX PE update failed:", err?.message || err);
+    debug.push({
+      source: "tpex-pe",
+      error: String(err?.message || err),
+    });
+  }
+
   const count = Object.keys(stocks).length;
   const sampleParsed = Object.values(stocks).slice(0, 5);
   const industryCount = Object.values(stocks).filter((item) => item?.industry).length;
@@ -7191,6 +7425,9 @@ app.get("/api/update-stocks", async (req, res) => {
   ).length;
   const epsTtmCount = Object.values(stocks).filter(
     (item) => typeof item?.epsTtm === "number" && Number.isFinite(item.epsTtm)
+  ).length;
+  const peCount = Object.values(stocks).filter(
+    (item) => typeof item?.peRatio === "number" && Number.isFinite(item.peRatio)
   ).length;
 
   if (twseCount < MIN_TWSE_STOCK_COUNT) {
@@ -7206,6 +7443,8 @@ app.get("/api/update-stocks", async (req, res) => {
       tpexEpsCount,
       twseEpsTtmCount,
       tpexEpsTtmCount,
+      twsePeCount,
+      tpexPeCount,
       minCount: MIN_TWSE_STOCK_COUNT,
       debug,
     });
@@ -7221,6 +7460,7 @@ app.get("/api/update-stocks", async (req, res) => {
       industryCount,
       epsCount,
       epsTtmCount,
+      peCount,
       sampleParsed,
       debug,
     });
@@ -7238,9 +7478,12 @@ app.get("/api/update-stocks", async (req, res) => {
     tpexEpsCount,
     twseEpsTtmCount,
     tpexEpsTtmCount,
+    twsePeCount,
+    tpexPeCount,
     industryCount,
     epsCount,
     epsTtmCount,
+    peCount,
     debug: {
       sampleParsed,
       sources: debug,
