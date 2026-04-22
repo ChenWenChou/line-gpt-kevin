@@ -2989,6 +2989,7 @@ async function estimateFoodCalorie(food) {
 // 股市 15分鐘延遲
 
 const STOCKS_REDIS_KEY = "twse:stocks:all";
+const STOCKS_META_REDIS_KEY = "twse:stocks:meta";
 const TWSE_STOCKS_OPENAPI_URL =
   "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL";
 const TWSE_STOCKS_CSV_URL =
@@ -7896,6 +7897,7 @@ app.get("/api/update-stocks", async (req, res) => {
   }
 
   const count = Object.keys(stocks).length;
+  const lastUpdatedAt = new Date().toISOString();
   const sampleParsed = Object.values(stocks).slice(0, 5);
   const industryCount = Object.values(stocks).filter((item) => item?.industry).length;
   const epsCount = Object.values(stocks).filter((item) =>
@@ -7957,8 +7959,22 @@ app.get("/api/update-stocks", async (req, res) => {
     });
   }
 
+  const metaPayload = {
+    lastUpdatedAt,
+    source,
+    count,
+  };
+  const metaSaved = await redisSet(
+    STOCKS_META_REDIS_KEY,
+    JSON.stringify(metaPayload)
+  );
+  if (!metaSaved) {
+    console.warn("Stock meta update failed: Redis unavailable");
+  }
+
   return res.json({
     ok: true,
+    lastUpdatedAt,
     source,
     count,
     twseCount,
@@ -7981,6 +7997,7 @@ app.get("/api/update-stocks", async (req, res) => {
     peCount,
     attentionCount,
     dispositionCount,
+    metaSaved,
     debug: {
       sampleParsed,
       sources: debug,
