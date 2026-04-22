@@ -371,6 +371,12 @@ const mazuLots = JSON.parse(
 const twAdminDivisions = JSON.parse(
   fs.readFileSync(path.join(__dirname, "data", "tw-admin-divisions.json"), "utf8")
 );
+const epsQuarterlyHistory = JSON.parse(
+  fs.readFileSync(
+    path.join(__dirname, "data", "eps-quarterly-history.json"),
+    "utf8"
+  )
+);
 
 function createTaiVariants(value = "") {
   const text = String(value || "").trim();
@@ -2995,7 +3001,6 @@ const TPEX_BASIC_INFO_CSV_URL =
   "https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv";
 const TWSE_EPS_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap14_L.csv";
 const TPEX_EPS_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap14_O.csv";
-const MOPS_QUARTERLY_EPS_URL = "https://mops.twse.com.tw/mops/web/ajax_t163sb04";
 const MIN_TWSE_STOCK_COUNT = 500;
 const MIN_TPEX_STOCK_COUNT = 300;
 const STOCK_QUOTE_TIMEOUT_MS = Number(process.env.STOCK_QUOTE_TIMEOUT_MS || 6000);
@@ -3401,42 +3406,6 @@ function isNewerQuarterPeriod(aYear, aQuarter, bYear, bQuarter) {
   return aQuarter > bQuarter;
 }
 
-function getQuarterPeriodsBackFrom(year, quarter, count = 4) {
-  const periods = [];
-  let currentYear = Number(year);
-  let currentQuarter = Number(quarter);
-  for (let i = 0; i < count; i++) {
-    if (!Number.isFinite(currentYear) || !Number.isFinite(currentQuarter)) break;
-    periods.push({ year: currentYear, quarter: currentQuarter });
-    currentQuarter -= 1;
-    if (currentQuarter <= 0) {
-      currentQuarter = 4;
-      currentYear -= 1;
-    }
-  }
-  return periods;
-}
-
-function decodeHtmlEntities(text) {
-  return String(text || "")
-    .replace(/&nbsp;|&#160;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'");
-}
-
-function stripHtmlToText(html) {
-  return decodeHtmlEntities(
-    String(html || "")
-      .replace(/<br\s*\/?>/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-  );
-}
-
 function parseCompanyBasicInfoCsv(text, market = "TWSE") {
   const lines = String(text || "")
     .split(/\n/)
@@ -3575,129 +3544,59 @@ async function fetchStockEpsCsv(url, market, sourceLabel) {
   };
 }
 
-async function fetchMopsQuarterlyEpsTable(typek, year, quarter, sourceLabel) {
-  const form = new URLSearchParams({
-    encodeURIComponent: "1",
-    step: "1",
-    firstin: "1",
-    off: "1",
-    isQuery: "Y",
-    TYPEK: typek,
-    year: String(year),
-    season: String(quarter).padStart(2, "0"),
-  });
-  const res = await fetch(MOPS_QUARTERLY_EPS_URL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      "user-agent": "Mozilla/5.0",
-      accept: "text/html,application/xhtml+xml",
-    },
-    body: form.toString(),
-  });
-  const contentType = res.headers.get("content-type") || "";
-  const text = await res.text();
-  const looksLikeBlocked = /頁面無法執行|THE PAGE CANNOT BE ACCESSED/i.test(text);
-  if (!res.ok || looksLikeBlocked) {
-    throw new Error(`${sourceLabel} unavailable: ${res.status}`);
-  }
-  return {
-    contentType,
-    head120: text.slice(0, 120),
-    rows: parseMopsQuarterlyEpsHtml(text, year, quarter),
-  };
+function getEpsHistorySnapshot(market, year, quarter) {
+  const marketKey = String(market || "").toUpperCase();
+  const yearKey = `${Number(year)}Q${Number(quarter)}`;
+  const snapshots = epsQuarterlyHistory?.snapshots?.[marketKey];
+  if (!snapshots || typeof snapshots !== "object") return null;
+  const snapshot = snapshots[yearKey];
+  return snapshot && typeof snapshot === "object" ? snapshot : null;
 }
 
-function parseMopsQuarterlyEpsHtml(html, year, quarter) {
-  const rows = [];
-  const rowMatches = String(html || "").matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi);
-  let codeIndex = -1;
-  let nameIndex = -1;
-  let epsIndex = -1;
-
-  for (const match of rowMatches) {
-    const cells = [...match[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(
-      (cellMatch) => stripHtmlToText(cellMatch[1])
-    );
-    if (!cells.length) continue;
-
-    if (
-      cells.some((cell) => cell.includes("公司代號")) &&
-      cells.some((cell) => cell.includes("基本每股盈餘"))
-    ) {
-      codeIndex = cells.findIndex((cell) => cell.includes("公司代號"));
-      nameIndex = cells.findIndex((cell) => cell.includes("公司名稱"));
-      epsIndex = cells.findIndex((cell) => cell.includes("基本每股盈餘"));
-      continue;
-    }
-
-    if (codeIndex < 0 || nameIndex < 0 || epsIndex < 0) continue;
-    if (cells.length <= Math.max(codeIndex, nameIndex, epsIndex)) continue;
-
-    const code = normalizeStockCode(cells[codeIndex]);
-    const name = String(cells[nameIndex] || "").trim();
-    const eps = normalizeEpsValue(cells[epsIndex]);
-    if (!code || !name || eps == null) continue;
-
-    rows.push({
-      code,
-      name,
-      year,
-      quarter,
-      eps,
-    });
-  }
-
-  return rows;
-}
-
-async function fetchTrailingFourQuarterEps(typek, market, latestYear, latestQuarter) {
-  const periods = getQuarterPeriodsBackFrom(latestYear, latestQuarter, 4);
-  const quarterlyMaps = [];
-  const debug = [];
-
-  for (const period of periods) {
-    const sourceLabel = `mops-eps-${typek}-${period.year}Q${period.quarter}`;
-    const result = await fetchMopsQuarterlyEpsTable(
-      typek,
-      period.year,
-      period.quarter,
-      sourceLabel
-    );
-    debug.push({
-      source: sourceLabel,
-      status: 200,
-      contentType: result.contentType,
-      count: result.rows.length,
-      head120: result.head120,
-    });
-    quarterlyMaps.push(
-      new Map(result.rows.map((row) => [row.code, row]))
-    );
+function buildTrailingFourQuarterEpsFromSeed(market, latestStocks, latestYear, latestQuarter) {
+  if (!Number.isFinite(latestYear) || !Number.isFinite(latestQuarter) || latestQuarter <= 0) {
+    return {};
   }
 
   const stocks = {};
-  const latestMap = quarterlyMaps[0] || new Map();
-  for (const [code, latestRow] of latestMap.entries()) {
-    const quarterRows = quarterlyMaps
-      .map((map) => map.get(code) || null)
-      .filter(Boolean);
-    if (quarterRows.length < 4) continue;
-    const epsTtm = quarterRows.reduce((sum, row) => sum + row.eps, 0);
+  const previousYearAnnual = getEpsHistorySnapshot(market, latestYear - 1, 4);
+  const previousYearSameQuarter =
+    latestQuarter === 4
+      ? null
+      : getEpsHistorySnapshot(market, latestYear - 1, latestQuarter);
+
+  Object.entries(latestStocks || {}).forEach(([code, info]) => {
+    if (!info || typeof info.epsLatestQuarter !== "number" || !Number.isFinite(info.epsLatestQuarter)) {
+      return;
+    }
+
+    let epsTtm = null;
+    if (latestQuarter === 4) {
+      epsTtm = info.epsLatestQuarter;
+    } else {
+      const priorAnnual = normalizeEpsValue(previousYearAnnual?.[code]);
+      const priorSameQuarter = normalizeEpsValue(previousYearSameQuarter?.[code]);
+      if (priorAnnual != null && priorSameQuarter != null) {
+        epsTtm = info.epsLatestQuarter + priorAnnual - priorSameQuarter;
+      }
+    }
+
+    if (epsTtm == null || !Number.isFinite(epsTtm)) return;
+
     addStockRecord(stocks, {
       code,
-      name: latestRow.name,
+      name: info.name,
       market,
-      epsLatestQuarter: Number(latestRow.eps.toFixed(2)),
-      epsYear: latestRow.year,
-      epsQuarter: latestRow.quarter,
+      epsLatestQuarter: info.epsLatestQuarter,
+      epsYear: info.epsYear,
+      epsQuarter: info.epsQuarter,
       epsTtm: Number(epsTtm.toFixed(2)),
-      epsTtmYear: latestRow.year,
-      epsTtmQuarter: latestRow.quarter,
+      epsTtmYear: latestYear,
+      epsTtmQuarter: latestQuarter,
     });
-  }
+  });
 
-  return { stocks, debug };
+  return stocks;
 }
 
 function getPostMarketPicksCacheKey(dateKey) {
@@ -7177,15 +7076,18 @@ app.get("/api/update-stocks", async (req, res) => {
       Number.isFinite(result.latestQuarter) &&
       result.latestQuarter > 0
     ) {
-      const trailing = await fetchTrailingFourQuarterEps(
-        "sii",
+      const trailing = buildTrailingFourQuarterEpsFromSeed(
         "TWSE",
+        result.stocks,
         result.latestYear,
         result.latestQuarter
       );
-      twseEpsTtmCount = Object.keys(trailing.stocks).length;
-      debug.push(...trailing.debug);
-      Object.entries(trailing.stocks).forEach(([code, info]) => {
+      twseEpsTtmCount = Object.keys(trailing).length;
+      debug.push({
+        source: `eps-seed-twse-${result.latestYear}Q${result.latestQuarter}`,
+        count: twseEpsTtmCount,
+      });
+      Object.entries(trailing).forEach(([code, info]) => {
         if (stocks[code]) {
           stocks[code].epsTtm =
             typeof info.epsTtm === "number" && Number.isFinite(info.epsTtm)
@@ -7243,15 +7145,18 @@ app.get("/api/update-stocks", async (req, res) => {
       Number.isFinite(result.latestQuarter) &&
       result.latestQuarter > 0
     ) {
-      const trailing = await fetchTrailingFourQuarterEps(
-        "otc",
+      const trailing = buildTrailingFourQuarterEpsFromSeed(
         "TPEX",
+        result.stocks,
         result.latestYear,
         result.latestQuarter
       );
-      tpexEpsTtmCount = Object.keys(trailing.stocks).length;
-      debug.push(...trailing.debug);
-      Object.entries(trailing.stocks).forEach(([code, info]) => {
+      tpexEpsTtmCount = Object.keys(trailing).length;
+      debug.push({
+        source: `eps-seed-tpex-${result.latestYear}Q${result.latestQuarter}`,
+        count: tpexEpsTtmCount,
+      });
+      Object.entries(trailing).forEach(([code, info]) => {
         if (stocks[code]) {
           stocks[code].epsTtm =
             typeof info.epsTtm === "number" && Number.isFinite(info.epsTtm)
