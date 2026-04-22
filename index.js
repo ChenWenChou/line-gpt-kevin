@@ -3004,6 +3004,14 @@ const TPEX_EPS_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap14_O.csv";
 const TWSE_PE_JSON_URL = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_d";
 const TPEX_PE_HTML_URL =
   "https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=htm";
+const TWSE_ATTENTION_HTML_URL =
+  "https://www.twse.com.tw/announcement/notice?response=html";
+const TWSE_DISPOSITION_HTML_URL =
+  "https://www.twse.com.tw/announcement/punish?response=html";
+const TPEX_ATTENTION_QUERY_URL =
+  "https://www.tpex.org.tw/web/bulletin/attention_information/trading_attention_information.php";
+const TPEX_DISPOSITION_QUERY_URL =
+  "https://www.tpex.org.tw/web/bulletin/disposal_information/disposal_information.php";
 const MIN_TWSE_STOCK_COUNT = 500;
 const MIN_TPEX_STOCK_COUNT = 300;
 const STOCK_QUOTE_TIMEOUT_MS = Number(process.env.STOCK_QUOTE_TIMEOUT_MS || 6000);
@@ -3026,7 +3034,7 @@ const STOCK_INTRADAY_MIN_POINTS = Number(
 const STOCK_INTRADAY_COLLECT_LIMIT = Number(
   process.env.STOCK_INTRADAY_COLLECT_LIMIT || 20
 );
-const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:recommend:v7:";
+const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:recommend:v8:";
 const DAILY_QUOTES_CACHE_PREFIX = "stock:dailyquotes:v2:";
 const POSTMARKET_SCAN_TTL_SECONDS = Number(
   process.env.POSTMARKET_SCAN_TTL_SECONDS || 60 * 60 * 20
@@ -3174,6 +3182,8 @@ function addStockRecord(
     epsTtmYear = null,
     epsTtmQuarter = null,
     peRatio = null,
+    isAttentionStock = null,
+    isDispositionStock = null,
   }
 ) {
   const normalizedCode = normalizeStockCode(code);
@@ -3238,6 +3248,18 @@ function addStockRecord(
         : typeof current.peRatio === "number" && Number.isFinite(current.peRatio)
         ? current.peRatio
         : null,
+    isAttentionStock:
+      typeof isAttentionStock === "boolean"
+        ? isAttentionStock
+        : typeof current.isAttentionStock === "boolean"
+        ? current.isAttentionStock
+        : false,
+    isDispositionStock:
+      typeof isDispositionStock === "boolean"
+        ? isDispositionStock
+        : typeof current.isDispositionStock === "boolean"
+        ? current.isDispositionStock
+        : false,
   };
   return true;
 }
@@ -3644,6 +3666,143 @@ function parseTpexPeHtml(text) {
   return stocks;
 }
 
+function parseHtmlTableRows(text) {
+  const rows = [...String(text || "").matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
+  return rows.map((match) =>
+    [...match[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map((cellMatch) =>
+      stripHtmlToText(cellMatch[1])
+    )
+  );
+}
+
+function parseTwseAttentionHtml(text) {
+  const rows = parseHtmlTableRows(text);
+  const stocks = {};
+  let codeIndex = -1;
+  let nameIndex = -1;
+
+  for (const cells of rows) {
+    if (!cells.length) continue;
+
+    if (
+      cells.some((cell) => cell.includes("證券代號")) &&
+      cells.some((cell) => cell.includes("證券名稱"))
+    ) {
+      codeIndex = cells.findIndex((cell) => cell.includes("證券代號"));
+      nameIndex = cells.findIndex((cell) => cell.includes("證券名稱"));
+      continue;
+    }
+
+    if (codeIndex < 0 || nameIndex < 0) continue;
+    if (cells.length <= Math.max(codeIndex, nameIndex)) continue;
+
+    const code = normalizeStockCode(cells[codeIndex]);
+    const name = String(cells[nameIndex] || "").trim();
+    if (!code || !name) continue;
+
+    addStockRecord(stocks, {
+      code,
+      name,
+      market: "TWSE",
+      isAttentionStock: true,
+    });
+  }
+
+  return stocks;
+}
+
+function parseTwseDispositionHtml(text) {
+  const rows = parseHtmlTableRows(text);
+  const stocks = {};
+  let codeIndex = -1;
+  let nameIndex = -1;
+
+  for (const cells of rows) {
+    if (!cells.length) continue;
+
+    if (
+      cells.some((cell) => cell.includes("證券代號")) &&
+      cells.some((cell) => cell.includes("證券名稱"))
+    ) {
+      codeIndex = cells.findIndex((cell) => cell.includes("證券代號"));
+      nameIndex = cells.findIndex((cell) => cell.includes("證券名稱"));
+      continue;
+    }
+
+    if (codeIndex < 0 || nameIndex < 0) continue;
+    if (cells.length <= Math.max(codeIndex, nameIndex)) continue;
+
+    const code = normalizeStockCode(cells[codeIndex]);
+    const name = String(cells[nameIndex] || "").trim();
+    if (!code || !name) continue;
+
+    addStockRecord(stocks, {
+      code,
+      name,
+      market: "TWSE",
+      isDispositionStock: true,
+    });
+  }
+
+  return stocks;
+}
+
+function parseTpexAttentionJson(json) {
+  const stocks = {};
+  const tables = Array.isArray(json?.tables) ? json.tables : [];
+
+  for (const table of tables) {
+    const fields = Array.isArray(table?.fields) ? table.fields.map(String) : [];
+    const data = Array.isArray(table?.data) ? table.data : [];
+    const codeIndex = fields.findIndex((field) => field.includes("證券代號"));
+    const nameIndex = fields.findIndex((field) => field.includes("證券名稱"));
+    if (codeIndex < 0 || nameIndex < 0) continue;
+
+    for (const row of data) {
+      if (!Array.isArray(row)) continue;
+      const code = normalizeStockCode(row[codeIndex]);
+      const name = String(row[nameIndex] || "").trim();
+      if (!code || !name) continue;
+      addStockRecord(stocks, {
+        code,
+        name,
+        market: "TPEX",
+        isAttentionStock: true,
+      });
+    }
+  }
+
+  return stocks;
+}
+
+function parseTpexDispositionJson(json) {
+  const stocks = {};
+  const tables = Array.isArray(json?.tables) ? json.tables : [];
+
+  for (const table of tables) {
+    const fields = Array.isArray(table?.fields) ? table.fields.map(String) : [];
+    const data = Array.isArray(table?.data) ? table.data : [];
+    const codeIndex = fields.findIndex((field) => field.includes("證券代號"));
+    const nameIndex = fields.findIndex((field) => field.includes("證券名稱"));
+    if (codeIndex < 0 || nameIndex < 0) continue;
+
+    for (const row of data) {
+      if (!Array.isArray(row)) continue;
+      const code = normalizeStockCode(row[codeIndex]);
+      const name = String(row[nameIndex] || "").trim();
+      if (!code || !name) continue;
+      addStockRecord(stocks, {
+        code,
+        name,
+        market: "TPEX",
+        isDispositionStock: true,
+      });
+    }
+  }
+
+  return stocks;
+}
+
 async function fetchTextResponse(url, options = {}) {
   const res = await fetch(url, options);
   const contentType = res.headers.get("content-type") || "";
@@ -3731,6 +3890,94 @@ async function fetchTpexPeJson() {
     contentType,
     head120: text.slice(0, 120),
     stocks: parseTpexPeHtml(text),
+  };
+}
+
+async function fetchTwseAttentionHtml() {
+  const { res, contentType, text } = await fetchTextResponse(TWSE_ATTENTION_HTML_URL, {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "text/html,*/*;q=0.8",
+    },
+  });
+  const looksLikeHTML = /<html|<!doctype html/i.test(text);
+  if (!res.ok || !looksLikeHTML) {
+    throw new Error(`twse-attention unavailable: ${res.status}`);
+  }
+  return {
+    contentType,
+    head120: text.slice(0, 120),
+    stocks: parseTwseAttentionHtml(text),
+  };
+}
+
+async function fetchTwseDispositionHtml() {
+  const { res, contentType, text } = await fetchTextResponse(
+    TWSE_DISPOSITION_HTML_URL,
+    {
+      headers: {
+        "user-agent": "Mozilla/5.0",
+        accept: "text/html,*/*;q=0.8",
+      },
+    }
+  );
+  const looksLikeHTML = /<html|<!doctype html/i.test(text);
+  if (!res.ok || !looksLikeHTML) {
+    throw new Error(`twse-disposition unavailable: ${res.status}`);
+  }
+  return {
+    contentType,
+    head120: text.slice(0, 120),
+    stocks: parseTwseDispositionHtml(text),
+  };
+}
+
+async function fetchTpexAttentionJson() {
+  const res = await fetch("https://www.tpex.org.tw/www/zh-tw/bulletin/attention", {
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "application/json,text/plain,*/*",
+    },
+  });
+  const contentType = res.headers.get("content-type") || "";
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`tpex-attention unavailable: ${res.status}`);
+  }
+  const json = JSON.parse(text);
+  if (String(json?.stat || "").toLowerCase() !== "ok") {
+    throw new Error(`tpex-attention unavailable: ${res.status}`);
+  }
+  return {
+    contentType,
+    head120: text.slice(0, 120),
+    stocks: parseTpexAttentionJson(json),
+  };
+}
+
+async function fetchTpexDispositionJson() {
+  const res = await fetch(
+    "https://www.tpex.org.tw/www/zh-tw/bulletin/disposal",
+    {
+      headers: {
+        "user-agent": "Mozilla/5.0",
+        accept: "application/json,text/plain,*/*",
+      },
+    }
+  );
+  const contentType = res.headers.get("content-type") || "";
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`tpex-disposition unavailable: ${res.status}`);
+  }
+  const json = JSON.parse(text);
+  if (String(json?.stat || "").toLowerCase() !== "ok") {
+    throw new Error(`tpex-disposition unavailable: ${res.status}`);
+  }
+  return {
+    contentType,
+    head120: text.slice(0, 120),
+    stocks: parseTpexDispositionJson(json),
   };
 }
 
@@ -4181,6 +4428,12 @@ function buildPostMarketTags(metrics) {
     tags.push("續強");
   }
 
+  if (metrics.isDispositionStock) {
+    tags.push("處置股");
+  } else if (metrics.isAttentionStock) {
+    tags.push("注意股");
+  }
+
   if (metrics.isFundamentallyWeak) {
     tags.push("基本面偏弱");
   }
@@ -4252,6 +4505,20 @@ function buildPostMarketStockStyleComment(metrics) {
 }
 
 function buildPostMarketPickComment(metrics) {
+  if (metrics.isDispositionStock) {
+    return "列為處置股，交易限制較多，僅適合高風險觀察。";
+  }
+  if (metrics.isAttentionStock && metrics.isFundamentallyWeak) {
+    return "已列注意股，且近四季 EPS 偏弱，不列入主推薦。";
+  }
+  if (metrics.isAttentionStock && metrics.isValuationExpensive) {
+    return "已列注意股，且估值偏高，不列入主推薦。";
+  }
+  if (metrics.isAttentionStock) {
+    return `${buildPostMarketStructureComment(
+      metrics
+    )}，但已列注意股，交易風險較高。`;
+  }
   if (metrics.isFundamentallyWeak && metrics.isValuationExpensive) {
     return "近四季 EPS 偏弱，且估值偏高，不列入主推薦。";
   }
@@ -4330,6 +4597,12 @@ function normalizePostMarketPick(pick) {
     typeof pick.peRatio === "number" && Number.isFinite(pick.peRatio)
       ? pick.peRatio
       : null;
+  const isAttentionStock =
+    typeof pick.isAttentionStock === "boolean" ? pick.isAttentionStock : false;
+  const isDispositionStock =
+    typeof pick.isDispositionStock === "boolean"
+      ? pick.isDispositionStock
+      : false;
   const epsTtm =
     typeof pick.epsTtm === "number" && Number.isFinite(pick.epsTtm)
       ? pick.epsTtm
@@ -4394,6 +4667,8 @@ function normalizePostMarketPick(pick) {
         tradeValue,
         avgVol20,
         peRatio,
+        isAttentionStock,
+        isDispositionStock,
         consecutiveUpDays,
         liquidityPass,
         isWeakLiquidity,
@@ -4406,6 +4681,8 @@ function normalizePostMarketPick(pick) {
     ...pick,
     industry: normalizeIndustryName(pick.industry),
     peRatio,
+    isAttentionStock,
+    isDispositionStock,
     epsLatestQuarter,
     epsYear: Number.isFinite(pick.epsYear) ? Number(pick.epsYear) : null,
     epsQuarter: Number.isFinite(pick.epsQuarter) ? Number(pick.epsQuarter) : null,
@@ -4435,6 +4712,8 @@ function normalizePostMarketPick(pick) {
         tradeValue,
         avgVol20,
         peRatio,
+        isAttentionStock,
+        isDispositionStock,
         consecutiveUpDays,
         liquidityPass,
         isWeakLiquidity,
@@ -4630,7 +4909,7 @@ function formatPostMarketPicksText(payload) {
 
   lines.push("");
   lines.push(
-    "條件：5~40元、5MA>20MA、站上20MA、5/20日漲幅為正、量能放大、排除ETF；主推薦另加流動性、過熱、近四季EPS與本益比紅燈過濾"
+    "條件：5~40元、5MA>20MA、站上20MA、5/20日漲幅為正、量能放大、排除ETF；主推薦另加流動性、過熱、近四季EPS、本益比與注意/處置股過濾"
   );
   return lines.join("\n");
 }
@@ -4693,6 +4972,12 @@ async function computePostMarketPicks() {
       typeof stock?.peRatio === "number" && Number.isFinite(stock.peRatio)
         ? stock.peRatio
         : null;
+    const isAttentionStock =
+      typeof stock?.isAttentionStock === "boolean" ? stock.isAttentionStock : false;
+    const isDispositionStock =
+      typeof stock?.isDispositionStock === "boolean"
+        ? stock.isDispositionStock
+        : false;
     const epsTtm =
       typeof stock?.epsTtm === "number" && Number.isFinite(stock.epsTtm)
         ? stock.epsTtm
@@ -4757,6 +5042,8 @@ async function computePostMarketPicks() {
       avgVol20,
       tradeValue,
       peRatio,
+      isAttentionStock,
+      isDispositionStock,
       bias5,
       bias20,
       consecutiveUpDays,
@@ -4773,6 +5060,8 @@ async function computePostMarketPicks() {
       market: stock.market,
       industry: stock.industry || null,
       peRatio,
+      isAttentionStock,
+      isDispositionStock,
       epsLatestQuarter,
       epsYear:
         Number.isFinite(stock?.epsYear) && stock.epsYear > 0
@@ -4818,7 +5107,9 @@ async function computePostMarketPicks() {
       liquidityPass &&
       !isOverheated &&
       !isFundamentallyWeak &&
-      !isValuationExpensive
+      !isValuationExpensive &&
+      !isAttentionStock &&
+      !isDispositionStock
     ) {
       recommendedCandidates.push(candidate);
     } else {
@@ -7115,6 +7406,10 @@ app.get("/api/update-stocks", async (req, res) => {
   let tpexEpsTtmCount = 0;
   let twsePeCount = 0;
   let tpexPeCount = 0;
+  let twseAttentionCount = 0;
+  let twseDispositionCount = 0;
+  let tpexAttentionCount = 0;
+  let tpexDispositionCount = 0;
 
   try {
     const r = await fetch(TWSE_STOCKS_OPENAPI_URL, {
@@ -7485,6 +7780,114 @@ app.get("/api/update-stocks", async (req, res) => {
     });
   }
 
+  try {
+    const result = await fetchTwseAttentionHtml();
+    twseAttentionCount = Object.keys(result.stocks).length;
+    debug.push({
+      source: "twse-attention",
+      status: 200,
+      contentType: result.contentType,
+      count: twseAttentionCount,
+      head120: result.head120,
+    });
+    Object.entries(result.stocks).forEach(([code, info]) => {
+      if (stocks[code]) {
+        stocks[code].isAttentionStock =
+          typeof info.isAttentionStock === "boolean"
+            ? info.isAttentionStock
+            : stocks[code].isAttentionStock ?? false;
+      }
+    });
+    source = source ? `${source}+twse-attention` : "twse-attention";
+  } catch (err) {
+    console.warn("TWSE attention update failed:", err?.message || err);
+    debug.push({
+      source: "twse-attention",
+      error: String(err?.message || err),
+    });
+  }
+
+  try {
+    const result = await fetchTwseDispositionHtml();
+    twseDispositionCount = Object.keys(result.stocks).length;
+    debug.push({
+      source: "twse-disposition",
+      status: 200,
+      contentType: result.contentType,
+      count: twseDispositionCount,
+      head120: result.head120,
+    });
+    Object.entries(result.stocks).forEach(([code, info]) => {
+      if (stocks[code]) {
+        stocks[code].isDispositionStock =
+          typeof info.isDispositionStock === "boolean"
+            ? info.isDispositionStock
+            : stocks[code].isDispositionStock ?? false;
+      }
+    });
+    source = source ? `${source}+twse-disposition` : "twse-disposition";
+  } catch (err) {
+    console.warn("TWSE disposition update failed:", err?.message || err);
+    debug.push({
+      source: "twse-disposition",
+      error: String(err?.message || err),
+    });
+  }
+
+  try {
+    const result = await fetchTpexAttentionJson();
+    tpexAttentionCount = Object.keys(result.stocks).length;
+    debug.push({
+      source: "tpex-attention",
+      status: 200,
+      contentType: result.contentType,
+      count: tpexAttentionCount,
+      head120: result.head120,
+    });
+    Object.entries(result.stocks).forEach(([code, info]) => {
+      if (stocks[code]) {
+        stocks[code].isAttentionStock =
+          typeof info.isAttentionStock === "boolean"
+            ? info.isAttentionStock
+            : stocks[code].isAttentionStock ?? false;
+      }
+    });
+    source = source ? `${source}+tpex-attention` : "tpex-attention";
+  } catch (err) {
+    console.warn("TPEX attention update failed:", err?.message || err);
+    debug.push({
+      source: "tpex-attention",
+      error: String(err?.message || err),
+    });
+  }
+
+  try {
+    const result = await fetchTpexDispositionJson();
+    tpexDispositionCount = Object.keys(result.stocks).length;
+    debug.push({
+      source: "tpex-disposition",
+      status: 200,
+      contentType: result.contentType,
+      count: tpexDispositionCount,
+      head120: result.head120,
+    });
+    Object.entries(result.stocks).forEach(([code, info]) => {
+      if (stocks[code]) {
+        stocks[code].isDispositionStock =
+          typeof info.isDispositionStock === "boolean"
+            ? info.isDispositionStock
+            : stocks[code].isDispositionStock ?? false;
+      }
+    });
+    source = source ? `${source}+tpex-disposition` : "tpex-disposition";
+  } catch (err) {
+    console.warn("TPEX disposition update failed:", err?.message || err);
+    debug.push({
+      source: "tpex-disposition",
+      error: String(err?.message || err),
+    });
+  }
+
   const count = Object.keys(stocks).length;
   const sampleParsed = Object.values(stocks).slice(0, 5);
   const industryCount = Object.values(stocks).filter((item) => item?.industry).length;
@@ -7497,6 +7900,12 @@ app.get("/api/update-stocks", async (req, res) => {
   ).length;
   const peCount = Object.values(stocks).filter(
     (item) => typeof item?.peRatio === "number" && Number.isFinite(item.peRatio)
+  ).length;
+  const attentionCount = Object.values(stocks).filter(
+    (item) => item?.isAttentionStock === true
+  ).length;
+  const dispositionCount = Object.values(stocks).filter(
+    (item) => item?.isDispositionStock === true
   ).length;
 
   if (twseCount < MIN_TWSE_STOCK_COUNT) {
@@ -7514,6 +7923,10 @@ app.get("/api/update-stocks", async (req, res) => {
       tpexEpsTtmCount,
       twsePeCount,
       tpexPeCount,
+      twseAttentionCount,
+      twseDispositionCount,
+      tpexAttentionCount,
+      tpexDispositionCount,
       minCount: MIN_TWSE_STOCK_COUNT,
       debug,
     });
@@ -7530,6 +7943,8 @@ app.get("/api/update-stocks", async (req, res) => {
       epsCount,
       epsTtmCount,
       peCount,
+      attentionCount,
+      dispositionCount,
       sampleParsed,
       debug,
     });
@@ -7549,10 +7964,16 @@ app.get("/api/update-stocks", async (req, res) => {
     tpexEpsTtmCount,
     twsePeCount,
     tpexPeCount,
+    twseAttentionCount,
+    twseDispositionCount,
+    tpexAttentionCount,
+    tpexDispositionCount,
     industryCount,
     epsCount,
     epsTtmCount,
     peCount,
+    attentionCount,
+    dispositionCount,
     debug: {
       sampleParsed,
       sources: debug,
