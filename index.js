@@ -3894,7 +3894,10 @@ async function fetchTpexPeJson() {
 }
 
 async function fetchTwseAttentionHtml() {
-  const { res, contentType, text } = await fetchTextResponse(TWSE_ATTENTION_HTML_URL, {
+  const endDate = compactDateKeyFromDate(getTaipeiCalendarDate(0));
+  const startDate = compactDateKeyFromDate(getTaipeiCalendarDate(1));
+  const url = `${TWSE_ATTENTION_HTML_URL}&startDate=${startDate}&endDate=${endDate}`;
+  const { res, contentType, text } = await fetchTextResponse(url, {
     headers: {
       "user-agent": "Mozilla/5.0",
       accept: "text/html,*/*;q=0.8",
@@ -4094,6 +4097,10 @@ function dateKeyFromDate(date) {
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const day = String(date.getUTCDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function compactDateKeyFromDate(date) {
+  return dateKeyFromDate(date).replace(/-/g, "");
 }
 
 function getTaipeiCalendarDate(daysAgo = 0) {
