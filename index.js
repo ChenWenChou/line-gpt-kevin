@@ -5103,6 +5103,55 @@ async function buildSingleStockInsight(stock) {
     tags: buildPostMarketTags({ ...metrics, riskLevel }),
     volumeRatio,
     comment: buildPostMarketPickComment({ ...metrics, riskLevel }),
+    ma5,
+    ma20,
+    latestClose: close,
+  };
+}
+
+function adjustSingleStockInsightForIntraday(insight, quote, source) {
+  if (!insight || !quote || !isTaiwanStockMarketOpen()) return insight;
+  if (!source?.includes("realtime") && source !== "yahoo-delayed") return insight;
+  if (typeof quote.price !== "number" || !Number.isFinite(quote.price)) return insight;
+
+  const currentPrice = quote.price;
+  const ma5 = typeof insight.ma5 === "number" ? insight.ma5 : null;
+  const ma20 = typeof insight.ma20 === "number" ? insight.ma20 : null;
+  const changePercent =
+    typeof quote.changePercent === "number" && Number.isFinite(quote.changePercent)
+      ? quote.changePercent
+      : null;
+
+  const brokeMa5 = typeof ma5 === "number" && currentPrice < ma5;
+  const brokeMa20 = typeof ma20 === "number" && currentPrice < ma20;
+  const isSharpIntradayDrop = typeof changePercent === "number" && changePercent <= -6;
+
+  if (!brokeMa5 && !brokeMa20 && !isSharpIntradayDrop) return insight;
+
+  const nextTags = new Set(
+    (Array.isArray(insight.tags) ? insight.tags : []).filter(
+      (tag) => !["接近均線", "剛轉強"].includes(tag)
+    )
+  );
+  nextTags.add("盤中走弱");
+  if (isSharpIntradayDrop) nextTags.add("短線賣壓");
+
+  const riskLevel =
+    insight.riskLevel === "高風險觀察" ? insight.riskLevel : "盤中走弱";
+  let comment = "盤中走勢轉弱，短線賣壓偏重，先不要把它當成型態整齊。";
+  if (brokeMa5 && brokeMa20) {
+    comment = "盤中已跌破短中期均線，走勢轉弱，短線賣壓偏重。";
+  } else if (brokeMa5) {
+    comment = "盤中已跌破短期均線，走勢轉弱，先以保守觀察為主。";
+  } else if (isSharpIntradayDrop) {
+    comment = "盤中跌幅擴大，短線賣壓偏重，暫不宜把它解讀成沿均線整理。";
+  }
+
+  return {
+    ...insight,
+    riskLevel,
+    tags: Array.from(nextTags),
+    comment,
   };
 }
 
@@ -7374,7 +7423,12 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           const result = await getStockQuoteWithFallback(stock);
           if (!result) throw new Error("no data");
           const q = result.quote;
-          const insight = await buildSingleStockInsight(stock);
+          const rawInsight = await buildSingleStockInsight(stock);
+          const insight = adjustSingleStockInsightForIntraday(
+            rawInsight,
+            q,
+            result.source
+          );
 
           const sign = q.change > 0 ? "+" : "";
           const percent =
