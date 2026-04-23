@@ -5582,6 +5582,24 @@ function getStockMarketLabelBySymbol(symbol, stock) {
   return "台股";
 }
 
+function isTaiwanStockMarketOpen(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const weekday = parts.find((p) => p.type === "weekday")?.value || "";
+  const hour = Number(parts.find((p) => p.type === "hour")?.value || "0");
+  const minute = Number(parts.find((p) => p.type === "minute")?.value || "0");
+  const dayMap = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 0 };
+  const day = dayMap[weekday] ?? -1;
+  if (day < 1 || day > 5) return false;
+  const totalMinutes = hour * 60 + minute;
+  return totalMinutes >= 9 * 60 && totalMinutes <= 13 * 60 + 40;
+}
+
 function getRealtimeExchangePrefix(stock) {
   return stock?.market === "TPEX" || stock?.symbol?.endsWith(".TWO")
     ? "otc"
@@ -7298,14 +7316,22 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
               : "--";
           const marketLabel =
             result.symbol.endsWith(".TWO") ? "上櫃" : "上市";
-          const priceLabel = result.source?.includes("realtime") ? "現價" : "收盤";
-          const sourceNote = result.source?.includes("realtime")
-            ? "※ 資料來源：TWSE/TPEX 盤中即時快照"
-            : "※ 資料來源：Yahoo Finance（延遲報價）";
+          const isRealtimeQuote = result.source?.includes("realtime");
+          const priceLabel = isRealtimeQuote
+            ? "現價"
+            : isTaiwanStockMarketOpen()
+              ? "最新價（延遲）"
+              : "收盤";
+          const quoteSourceNote = result.source?.includes("realtime")
+            ? "※ 行情來源：TWSE/TPEX 盤中即時快照"
+            : "※ 行情來源：Yahoo Finance（延遲報價）";
+          const analysisSourceNote = insight
+            ? "※ 分析來源：TWSE/TPEX 日資料快取"
+            : null;
 
-          const extraLines = insight
+          const analysisLines = insight
             ? [
-                "",
+                "【分析】",
                 `判讀：${insight.riskLevel}`,
                 `產業：${formatStockIndustryName(insight.industry)}`,
                 `標籤：${(insight.tags || []).join("、") || "—"}`,
@@ -7321,13 +7347,16 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
           const text = `📊 ${stock.name}（${stock.code}｜${marketLabel}）
 
+【行情】
 ${priceLabel}：${fmtTWPrice(q.price)}
 漲跌：${sign}${fmtTWPrice(q.change)}（${percentSign}${percent}%）
 開盤：${fmtTWPrice(q.open)}
 昨收：${fmtTWPrice(q.prevClose)}
-成交量：${volumeLots} 張${extraLines.join("\n")}
+成交量：${volumeLots} 張
 
-${sourceNote}`;
+${analysisLines.join("\n")}${analysisLines.length ? "\n\n" : ""}${quoteSourceNote}${
+            analysisSourceNote ? `\n${analysisSourceNote}` : ""
+          }`;
 
           await replyMessageWithFallback(event, {
             type: "text",
