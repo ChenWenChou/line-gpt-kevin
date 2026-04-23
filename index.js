@@ -3058,6 +3058,16 @@ function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
       : data?.source === "freehoroscopeapi"
       ? "資料來源：FreeHoroscopeAPI，AI 中文整理，娛樂參考"
       : "資料來源：AI 備援生成，娛樂參考";
+  const hasValue = (value) => {
+    const text = String(value ?? "").trim();
+    return Boolean(text && text !== "-");
+  };
+  const luckyParts = [];
+  if (hasValue(data?.luckyColor)) luckyParts.push(`幸運色：${data.luckyColor}`);
+  if (hasValue(data?.luckyNumber)) luckyParts.push(`數字：${data.luckyNumber}`);
+  const extraParts = [];
+  if (hasValue(data?.luckyTime)) extraParts.push(`幸運時間：${data.luckyTime}`);
+  if (hasValue(data?.compatibility)) extraParts.push(`速配：${data.compatibility}`);
 
   return {
     type: "flex",
@@ -3118,19 +3128,27 @@ function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
             text: `🩺 健康：${data.health ?? "留意作息與精神消耗。"}`,
             wrap: true,
           },
-          {
-            type: "text",
-            text: `🎯 幸運色：${data.luckyColor ?? "-"}｜數字：${data.luckyNumber ?? "-"}`,
-            wrap: true,
-            weight: "bold",
-          },
-          {
-            type: "text",
-            text: `🕒 幸運時間：${data.luckyTime ?? "-"}｜速配：${data.compatibility ?? "-"}`,
-            wrap: true,
-            size: "sm",
-            color: "#555555",
-          },
+          ...(luckyParts.length
+            ? [
+                {
+                  type: "text",
+                  text: `🎯 ${luckyParts.join("｜")}`,
+                  wrap: true,
+                  weight: "bold",
+                },
+              ]
+            : []),
+          ...(extraParts.length
+            ? [
+                {
+                  type: "text",
+                  text: `🕒 ${extraParts.join("｜")}`,
+                  wrap: true,
+                  size: "sm",
+                  color: "#555555",
+                },
+              ]
+            : []),
 
           { type: "separator", margin: "md" },
           {
