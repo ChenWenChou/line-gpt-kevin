@@ -1361,14 +1361,34 @@ function resolveTaiwanDistrict(text = "", contextCountyName = "") {
   const input = String(text || "").trim();
   if (!input) return null;
   const contextCounty = String(contextCountyName || "").trim();
+  const explicitCounty =
+    Object.entries(CWA_LOCATION_MAP)
+      .sort((a, b) => b[0].length - a[0].length)
+      .find(([alias]) => input.includes(alias))?.[1] || "";
 
   for (const key of TW_DISTRICT_ALIAS_KEYS) {
     if (!input.includes(key)) continue;
 
     if (AMBIGUOUS_DISTRICT_ALIASES.has(key)) {
       const candidates = AMBIGUOUS_DISTRICT_CANDIDATES[key] || [];
+      if (explicitCounty) {
+        const countyMatchedCandidate = candidates.find(
+          (candidate) => candidate.countyName === explicitCounty
+        );
+        if (countyMatchedCandidate) {
+          return {
+            input: key,
+            displayName: countyMatchedCandidate.displayName,
+            countyName: countyMatchedCandidate.countyName,
+            districtName: countyMatchedCandidate.displayName,
+            cwaLocationName: countyMatchedCandidate.countyName,
+            matchedLevel: "district",
+          };
+        }
+      }
+
       const explicitCandidate = candidates.find((candidate) =>
-        [candidate.countyName, candidate.displayName].some((hint) =>
+        [candidate.countyName].some((hint) =>
           hint ? input.includes(hint) : false
         )
       );
