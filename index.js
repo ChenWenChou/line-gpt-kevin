@@ -5556,6 +5556,8 @@ async function getStockQuoteWithFallback(stock) {
       quote: {
         price: realtime.price,
         open: realtime.open,
+        high: realtime.high,
+        low: realtime.low,
         prevClose: realtime.previousClose,
         change,
         changePercent,
@@ -5569,11 +5571,65 @@ async function getStockQuoteWithFallback(stock) {
     };
   }
 
+  const officialDaily = await getLatestOfficialDailyQuote(stock);
+  if (officialDaily && !isTaiwanStockMarketOpen()) {
+    return officialDaily;
+  }
+
   for (const symbol of getStockCandidateSymbols(stock)) {
     const quote = await getStockQuote(symbol);
-    if (quote) return { quote, symbol };
+    if (quote) return { quote, symbol, source: "yahoo-delayed" };
   }
-  return null;
+
+  return officialDaily;
+}
+
+async function getLatestOfficialDailyQuote(stock) {
+  const code = normalizeStockCode(stock?.code);
+  if (!code) return null;
+
+  const snapshots = await getRecentTradingDaySnapshots(2);
+  const latestSnapshot = snapshots[0];
+  const previousSnapshot = snapshots[1];
+  const latestQuote = latestSnapshot?.quotes?.[code] || null;
+  if (!latestQuote || typeof latestQuote.close !== "number") return null;
+
+  const prevClose =
+    typeof previousSnapshot?.quotes?.[code]?.close === "number"
+      ? previousSnapshot.quotes[code].close
+      : null;
+  const changeRaw =
+    typeof prevClose === "number" ? latestQuote.close - prevClose : null;
+  const change =
+    typeof changeRaw === "number" && Math.abs(changeRaw) >= 0.005 ? changeRaw : 0;
+  const changePercentRaw =
+    typeof prevClose === "number" && prevClose > 0
+      ? (change / prevClose) * 100
+      : null;
+  const changePercent =
+    typeof changePercentRaw === "number" && Math.abs(changePercentRaw) >= 0.005
+      ? changePercentRaw
+      : 0;
+
+  return {
+    quote: {
+      price: latestQuote.close,
+      open: latestQuote.open,
+      high: latestQuote.high,
+      low: latestQuote.low,
+      prevClose,
+      change,
+      changePercent,
+      volume:
+        typeof latestQuote.volumeLots === "number"
+          ? latestQuote.volumeLots * 1000
+          : undefined,
+      tradeValue: latestQuote.tradeValue,
+    },
+    symbol: stock.symbol || `${stock.code}.${stock?.market === "TPEX" ? "TWO" : "TW"}`,
+    source: "official-daily",
+    dateKey: latestSnapshot?.dateKey || null,
+  };
 }
 
 function getStockMarketLabelBySymbol(symbol, stock) {
@@ -7317,17 +7373,45 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           const marketLabel =
             result.symbol.endsWith(".TWO") ? "上櫃" : "上市";
           const isRealtimeQuote = result.source?.includes("realtime");
+          const isOfficialDailyQuote = result.source === "official-daily";
+          const isDelayedQuote = result.source === "yahoo-delayed";
           const priceLabel = isRealtimeQuote
             ? "現價"
-            : isTaiwanStockMarketOpen()
-              ? "最新價（延遲）"
-              : "收盤";
-          const quoteSourceNote = result.source?.includes("realtime")
+            : isOfficialDailyQuote
+              ? "收盤"
+              : isTaiwanStockMarketOpen()
+                ? "最新價（延遲）"
+                : "收盤";
+          const quoteSourceNote = isRealtimeQuote
             ? "※ 行情來源：TWSE/TPEX 盤中即時快照"
-            : "※ 行情來源：Yahoo Finance（延遲報價）";
+            : isOfficialDailyQuote
+              ? "※ 行情來源：TWSE/TPEX 官方日資料"
+              : "※ 行情來源：Yahoo Finance（延遲報價）";
           const analysisSourceNote = insight
             ? "※ 分析來源：TWSE/TPEX 日資料快取"
             : null;
+          const marketLines = [
+            "【行情】",
+            `${priceLabel}：${fmtTWPrice(q.price)}`,
+            `漲跌：${sign}${fmtTWPrice(q.change)}（${percentSign}${percent}%）`,
+            `昨收：${fmtTWPrice(q.prevClose)}`,
+          ];
+
+          if (isRealtimeQuote || isOfficialDailyQuote) {
+            marketLines.splice(3, 0, `開盤：${fmtTWPrice(q.open)}`);
+            if (typeof q.high === "number") {
+              marketLines.splice(4, 0, `最高：${fmtTWPrice(q.high)}`);
+            }
+            if (typeof q.low === "number") {
+              const lowInsertIndex = marketLines.findIndex((line) =>
+                line.startsWith("昨收：")
+              );
+              marketLines.splice(lowInsertIndex, 0, `最低：${fmtTWPrice(q.low)}`);
+            }
+            marketLines.push(`成交量：${volumeLots} 張`);
+          } else if (isDelayedQuote) {
+            marketLines.push("註：盤中延遲報價不顯示開盤與成交量");
+          }
 
           const analysisLines = insight
             ? [
@@ -7347,12 +7431,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
           const text = `📊 ${stock.name}（${stock.code}｜${marketLabel}）
 
-【行情】
-${priceLabel}：${fmtTWPrice(q.price)}
-漲跌：${sign}${fmtTWPrice(q.change)}（${percentSign}${percent}%）
-開盤：${fmtTWPrice(q.open)}
-昨收：${fmtTWPrice(q.prevClose)}
-成交量：${volumeLots} 張
+${marketLines.join("\n")}
 
 ${analysisLines.join("\n")}${analysisLines.length ? "\n\n" : ""}${quoteSourceNote}${
             analysisSourceNote ? `\n${analysisSourceNote}` : ""
