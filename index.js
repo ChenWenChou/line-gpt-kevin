@@ -5578,7 +5578,23 @@ async function getStockQuoteWithFallback(stock) {
 
   for (const symbol of getStockCandidateSymbols(stock)) {
     const quote = await getStockQuote(symbol);
-    if (quote) return { quote, symbol, source: "yahoo-delayed" };
+    if (quote) {
+      const officialPrevClose =
+        typeof officialDaily?.quote?.price === "number" &&
+        Number.isFinite(officialDaily.quote.price) &&
+        officialDaily.quote.price > 0
+          ? officialDaily.quote.price
+          : null;
+      if (officialPrevClose != null) {
+        quote.prevClose = officialPrevClose;
+        const changeRaw = quote.price - officialPrevClose;
+        quote.change = Math.abs(changeRaw) < 0.005 ? 0 : changeRaw;
+        const changePercentRaw = (quote.change / officialPrevClose) * 100;
+        quote.changePercent =
+          Math.abs(changePercentRaw) < 0.005 ? 0 : changePercentRaw;
+      }
+      return { quote, symbol, source: "yahoo-delayed" };
+    }
   }
 
   return officialDaily;
