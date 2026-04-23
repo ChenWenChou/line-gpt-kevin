@@ -3541,6 +3541,38 @@ function addStockRecord(
   return true;
 }
 
+function mergeStockEnrichmentFromCache(stocks, cachedStocks = {}) {
+  const enrichmentFields = [
+    "industry",
+    "epsLatestQuarter",
+    "epsYear",
+    "epsQuarter",
+    "epsTtm",
+    "epsTtmYear",
+    "epsTtmQuarter",
+    "peRatio",
+  ];
+  let merged = 0;
+
+  for (const [code, stock] of Object.entries(stocks || {})) {
+    const cached = cachedStocks?.[code];
+    if (!stock || !cached) continue;
+    let touched = false;
+
+    for (const field of enrichmentFields) {
+      if (stock[field] != null) continue;
+      const value = cached[field];
+      if (value == null) continue;
+      stock[field] = value;
+      touched = true;
+    }
+
+    if (touched) merged++;
+  }
+
+  return merged;
+}
+
 function getStockCandidateSymbols(stock) {
   const code = normalizeStockCode(stock?.code);
   const symbols = [stock?.symbol].filter(Boolean);
@@ -8059,8 +8091,15 @@ app.get("/api/update-stocks", async (req, res) => {
     return res.status(401).json({ error: "unauthorized" });
   }
 
+  const mode =
+    String(req.query?.mode || "fast").trim().toLowerCase() === "full"
+      ? "full"
+      : "fast";
+  const isFullUpdate = mode === "full";
   const debug = [];
   let stocks = {};
+  let cachedStocks = {};
+  let cachedEnrichmentCount = 0;
   let source = "";
   let twseCount = 0;
   let tpexCount = 0;
@@ -8076,6 +8115,16 @@ app.get("/api/update-stocks", async (req, res) => {
   let twseDispositionCount = 0;
   let tpexAttentionCount = 0;
   let tpexDispositionCount = 0;
+
+  if (!isFullUpdate) {
+    try {
+      const raw = await redisGet(STOCKS_REDIS_KEY);
+      cachedStocks = raw ? JSON.parse(raw) : {};
+    } catch (err) {
+      console.warn("Stock cache load failed for fast update:", err?.message || err);
+      cachedStocks = {};
+    }
+  }
 
   try {
     const r = await fetch(TWSE_STOCKS_OPENAPI_URL, {
@@ -8198,6 +8247,7 @@ app.get("/api/update-stocks", async (req, res) => {
     });
   }
 
+  if (isFullUpdate) {
   try {
     const result = await fetchStockIndustryCsv(
       TWSE_BASIC_INFO_CSV_URL,
@@ -8445,6 +8495,23 @@ app.get("/api/update-stocks", async (req, res) => {
       error: String(err?.message || err),
     });
   }
+  } else {
+    cachedEnrichmentCount = mergeStockEnrichmentFromCache(stocks, cachedStocks);
+    debug.push({
+      source: "cached-enrichment",
+      mode,
+      count: cachedEnrichmentCount,
+      skipped: [
+        "twse-basic-info",
+        "tpex-basic-info",
+        "twse-eps",
+        "tpex-eps",
+        "twse-pe",
+        "tpex-pe",
+      ],
+    });
+    source = source ? `${source}+cached-enrichment` : "cached-enrichment";
+  }
 
   try {
     const result = await fetchTwseAttentionHtml();
@@ -8621,6 +8688,7 @@ app.get("/api/update-stocks", async (req, res) => {
     lastUpdatedAt,
     source,
     count,
+    mode,
   };
   const metaSaved = await redisSet(
     STOCKS_META_REDIS_KEY,
@@ -8632,6 +8700,7 @@ app.get("/api/update-stocks", async (req, res) => {
 
   return res.json({
     ok: true,
+    mode,
     lastUpdatedAt,
     source,
     count,
@@ -8655,6 +8724,7 @@ app.get("/api/update-stocks", async (req, res) => {
     peCount,
     attentionCount,
     dispositionCount,
+    cachedEnrichmentCount,
     metaSaved,
     debug: {
       sampleParsed,
