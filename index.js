@@ -4990,6 +4990,122 @@ function formatPostMarketPicksText(payload) {
   return lines.join("\n");
 }
 
+function buildSingleStockRiskLabel(metrics) {
+  if (
+    metrics.isDispositionStock ||
+    metrics.isAttentionStock ||
+    metrics.isFundamentallyWeak ||
+    metrics.isValuationExpensive
+  ) {
+    return "高風險觀察";
+  }
+  return buildPostMarketRiskLevel(metrics);
+}
+
+async function buildSingleStockInsight(stock) {
+  if (!stock?.code) return null;
+
+  const snapshots = await getRecentTradingDaySnapshots(21);
+  if (snapshots.length < 21) return null;
+
+  const newestToOldest = snapshots;
+  const series = newestToOldest
+    .map((snapshot) => snapshot.quotes[stock.code] || null)
+    .filter(
+      (quote) =>
+        quote &&
+        typeof quote.close === "number" &&
+        typeof quote.volumeLots === "number"
+    )
+    .reverse();
+
+  if (series.length < 21) return null;
+
+  const closes = series.map((quote) => quote.close);
+  const volumes = series.map((quote) => quote.volumeLots);
+  const latestQuote = series[series.length - 1];
+  const close = closes[closes.length - 1];
+  const ma5 = calcMovingAverage(closes, 5);
+  const ma20 = calcMovingAverage(closes, 20);
+  const change5d = calcPercentChange(close, closes[closes.length - 6]);
+  const change20d = calcPercentChange(close, closes[closes.length - 21]);
+  const avgVol5 = calcAverage(volumes.slice(volumes.length - 5));
+  const avgVol20 = calcAverage(volumes.slice(volumes.length - 20));
+  const tradeValue =
+    typeof latestQuote?.tradeValue === "number" && Number.isFinite(latestQuote.tradeValue)
+      ? latestQuote.tradeValue
+      : 0;
+  const peRatio =
+    typeof stock?.peRatio === "number" && Number.isFinite(stock.peRatio)
+      ? stock.peRatio
+      : null;
+  const epsTtm =
+    typeof stock?.epsTtm === "number" && Number.isFinite(stock.epsTtm)
+      ? stock.epsTtm
+      : null;
+  const isAttentionStock =
+    typeof stock?.isAttentionStock === "boolean" ? stock.isAttentionStock : false;
+  const isDispositionStock =
+    typeof stock?.isDispositionStock === "boolean" ? stock.isDispositionStock : false;
+
+  if (
+    [close, ma5, ma20, change5d, change20d, avgVol5, avgVol20].some(
+      (value) => typeof value !== "number" || !Number.isFinite(value)
+    )
+  ) {
+    return null;
+  }
+
+  const volumeRatio = avgVol20 > 0 ? avgVol5 / avgVol20 : 0;
+  const bias5 = ma5 > 0 ? (close - ma5) / ma5 : -1;
+  const bias20 = ma20 > 0 ? (close - ma20) / ma20 : -1;
+  const consecutiveUpDays = countConsecutiveUpDays(closes);
+  const liquidityPass = avgVol20 >= 2000 || tradeValue >= 1e8;
+  const isWeakLiquidity = avgVol20 < 2000 && tradeValue < 1e8;
+  const isOverheated =
+    change20d > 35 ||
+    consecutiveUpDays >= 6 ||
+    bias5 > 0.06 ||
+    bias20 > 0.12;
+  const isFundamentallyWeak =
+    typeof epsTtm === "number" && Number.isFinite(epsTtm) && epsTtm <= 0;
+  const isValuationExpensive =
+    typeof peRatio === "number" &&
+    Number.isFinite(peRatio) &&
+    peRatio > POSTMARKET_PE_RED_FLAG_THRESHOLD &&
+    tradeValue < POSTMARKET_PE_LOW_LIQUIDITY_VALUE;
+
+  const metrics = {
+    close,
+    tradeValue,
+    change5d,
+    change20d,
+    bias5,
+    bias20,
+    volumeRatio,
+    avgVol20,
+    consecutiveUpDays,
+    liquidityPass,
+    isWeakLiquidity,
+    isOverheated,
+    isAttentionStock,
+    isDispositionStock,
+    isFundamentallyWeak,
+    isValuationExpensive,
+    peRatio,
+    riskLevel: null,
+  };
+
+  const riskLevel = buildSingleStockRiskLabel(metrics);
+  return {
+    riskLevel,
+    industry: normalizeIndustryName(stock?.industry),
+    tags: buildPostMarketTags({ ...metrics, riskLevel }),
+    volumeRatio,
+    comment: buildPostMarketPickComment({ ...metrics, riskLevel }),
+  };
+}
+
 async function computePostMarketPicks() {
   const raw = await redisGet(STOCKS_REDIS_KEY);
   const stocks = raw ? JSON.parse(raw) : {};
@@ -7168,6 +7284,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           const result = await getStockQuoteWithFallback(stock);
           if (!result) throw new Error("no data");
           const q = result.quote;
+          const insight = await buildSingleStockInsight(stock);
 
           const sign = q.change > 0 ? "+" : "";
           const percent =
@@ -7181,17 +7298,34 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
               : "--";
           const marketLabel =
             result.symbol.endsWith(".TWO") ? "上櫃" : "上市";
+          const priceLabel = result.source?.includes("realtime") ? "現價" : "收盤";
           const sourceNote = result.source?.includes("realtime")
             ? "※ 資料來源：TWSE/TPEX 盤中即時快照"
             : "※ 資料來源：Yahoo Finance（延遲報價）";
 
+          const extraLines = insight
+            ? [
+                "",
+                `判讀：${insight.riskLevel}`,
+                `產業：${formatStockIndustryName(insight.industry)}`,
+                `標籤：${(insight.tags || []).join("、") || "—"}`,
+                `量比：${
+                  typeof insight.volumeRatio === "number" &&
+                  Number.isFinite(insight.volumeRatio)
+                    ? insight.volumeRatio.toFixed(2)
+                    : "--"
+                }`,
+                `短評：${insight.comment}`,
+              ]
+            : [];
+
           const text = `📊 ${stock.name}（${stock.code}｜${marketLabel}）
 
-現價：${fmtTWPrice(q.price)}
+${priceLabel}：${fmtTWPrice(q.price)}
 漲跌：${sign}${fmtTWPrice(q.change)}（${percentSign}${percent}%）
 開盤：${fmtTWPrice(q.open)}
 昨收：${fmtTWPrice(q.prevClose)}
-成交量：${volumeLots} 張
+成交量：${volumeLots} 張${extraLines.join("\n")}
 
 ${sourceNote}`;
 
