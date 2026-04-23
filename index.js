@@ -654,6 +654,8 @@ const GENERAL_REPLY_MAX_CHARS = Number(
 );
 const REMINDER_QUEUE_KEY = "reminder:due";
 const LINE_PUSH_TARGETS_KEY = "line:pushTargets";
+const CWA_EARTHQUAKE_LAST_PUSHED_KEY = "cwa:earthquake:lastPushed";
+const CWA_EARTHQUAKE_DATASET = "E-A0015-001";
 const REMINDER_ITEM_PREFIX = "reminder:item:";
 const REMINDER_TTL_SECONDS = Number(
   process.env.REMINDER_TTL_SECONDS || 60 * 60 * 24 * 7
@@ -1077,10 +1079,36 @@ async function rememberLinePushTarget(event) {
     targetType: target.targetType,
     targetId: target.targetId,
     sourceType: event?.source?.type || null,
-    lastSeenAt: Date.now(),
   };
 
   return redisSAdd(LINE_PUSH_TARGETS_KEY, JSON.stringify(payload));
+}
+
+async function getKnownLinePushTargets() {
+  const members = await redisSMembers(LINE_PUSH_TARGETS_KEY);
+  const targetMap = new Map();
+
+  for (const member of members) {
+    let payload = null;
+    try {
+      payload = JSON.parse(member);
+    } catch {
+      continue;
+    }
+
+    const targetId = String(payload?.targetId || "").trim();
+    if (!targetId) continue;
+    const targetType = String(
+      payload?.targetType || payload?.sourceType || "unknown"
+    ).trim();
+    const key = `${targetType}:${targetId}`;
+    targetMap.set(key, {
+      targetType,
+      targetId,
+    });
+  }
+
+  return [...targetMap.values()];
 }
 
 async function scheduleReminder(event, parsedReminder) {
@@ -1993,6 +2021,194 @@ function getCwaHeaders() {
   return {
     accept: "application/json",
     "user-agent": "Mozilla/5.0",
+  };
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 160)}`);
+    }
+    return text ? JSON.parse(text) : null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function simpleStableHash(text) {
+  let hash = 0;
+  const input = String(text || "");
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash * 31 + input.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+async function fetchCwaSignificantEarthquakes() {
+  if (!CWA_API_KEY) {
+    throw new Error("CWA_API_KEY is missing");
+  }
+
+  const url = `https://opendata.cwa.gov.tw/api/v1/rest/datastore/${CWA_EARTHQUAKE_DATASET}?Authorization=${encodeURIComponent(
+    CWA_API_KEY
+  )}&format=JSON`;
+  const json = await fetchJsonWithTimeout(url, { headers: getCwaHeaders() });
+  const records = json?.records || {};
+  if (Array.isArray(records?.Earthquake)) return records.Earthquake;
+  if (Array.isArray(records?.earthquake)) return records.earthquake;
+  if (Array.isArray(records?.dataset?.earthquake)) {
+    return records.dataset.earthquake;
+  }
+  return [];
+}
+
+function extractEarthquakeMagnitude(eq) {
+  const magnitude =
+    eq?.EarthquakeInfo?.EarthquakeMagnitude?.MagnitudeValue ??
+    eq?.EarthquakeInfo?.EarthquakeMagnitude?.magnitudeValue ??
+    eq?.EarthquakeInfo?.Magnitude?.MagnitudeValue ??
+    eq?.Magnitude ??
+    eq?.magnitude;
+  return parseMarketNumber(magnitude);
+}
+
+function extractEarthquakeDepth(eq) {
+  const depth =
+    eq?.EarthquakeInfo?.FocalDepth ??
+    eq?.EarthquakeInfo?.focalDepth ??
+    eq?.FocalDepth ??
+    eq?.depth;
+  return parseMarketNumber(depth);
+}
+
+function extractEarthquakeOriginTime(eq) {
+  return String(
+    eq?.EarthquakeInfo?.OriginTime ||
+      eq?.EarthquakeInfo?.originTime ||
+      eq?.OriginTime ||
+      eq?.originTime ||
+      ""
+  ).trim();
+}
+
+function extractEarthquakeLocation(eq) {
+  const epicenter = eq?.EarthquakeInfo?.Epicenter || eq?.EarthquakeInfo?.epicenter;
+  return String(
+    epicenter?.Location ||
+      epicenter?.location ||
+      eq?.ReportContent?.match(/位於(.+?)[，,。]/)?.[1] ||
+      eq?.ReportContent ||
+      ""
+  ).trim();
+}
+
+function extractEarthquakeMaxIntensity(eq) {
+  const areas = Array.isArray(eq?.Intensity?.ShakingArea)
+    ? eq.Intensity.ShakingArea
+    : Array.isArray(eq?.Intensity?.shakingArea)
+    ? eq.Intensity.shakingArea
+    : [];
+  const intensities = areas
+    .map((area) =>
+      String(
+        area?.AreaIntensity ||
+          area?.areaIntensity ||
+          area?.CountyIntensity ||
+          area?.countyIntensity ||
+          ""
+      ).trim()
+    )
+    .filter(Boolean);
+  return intensities[0] || "";
+}
+
+function normalizeCwaEarthquake(eq) {
+  const reportNo = String(
+    eq?.EarthquakeNo || eq?.earthquakeNo || eq?.ReportNo || eq?.reportNo || ""
+  ).trim();
+  const originTime = extractEarthquakeOriginTime(eq);
+  const magnitude = extractEarthquakeMagnitude(eq);
+  const depth = extractEarthquakeDepth(eq);
+  const location = extractEarthquakeLocation(eq);
+  const maxIntensity = extractEarthquakeMaxIntensity(eq);
+  const reportContent = String(eq?.ReportContent || eq?.reportContent || "").trim();
+  const web = String(eq?.Web || eq?.web || "").trim();
+  const imageUrl = String(eq?.ReportImageURI || eq?.reportImageURI || "").trim();
+  const id = reportNo || `${originTime}:${simpleStableHash(reportContent || location)}`;
+
+  return {
+    id,
+    reportNo,
+    originTime,
+    magnitude,
+    depth,
+    location,
+    maxIntensity,
+    reportContent,
+    web,
+    imageUrl,
+  };
+}
+
+function pickLatestEarthquake(events) {
+  const normalized = events.map(normalizeCwaEarthquake).filter((item) => item.id);
+  normalized.sort((a, b) => {
+    const at = Date.parse(a.originTime || "");
+    const bt = Date.parse(b.originTime || "");
+    if (Number.isFinite(bt) && Number.isFinite(at) && bt !== at) return bt - at;
+    return String(b.id).localeCompare(String(a.id));
+  });
+  return normalized[0] || null;
+}
+
+function formatEarthquakePushText(event) {
+  const lines = ["【顯著有感地震報告】"];
+  if (event.reportNo) lines.push(`編號：${event.reportNo}`);
+  if (event.originTime) lines.push(`發震時間：${event.originTime}`);
+  if (Number.isFinite(event.magnitude)) lines.push(`芮氏規模：${event.magnitude}`);
+  if (Number.isFinite(event.depth)) lines.push(`震源深度：${event.depth} 公里`);
+  if (event.location) lines.push(`位置：${event.location}`);
+  if (event.maxIntensity) lines.push(`最大震度：${event.maxIntensity}`);
+  if (event.web) lines.push("", `詳細資料：${event.web}`);
+  lines.push("", "資料來源：中央氣象署");
+  return lines.join("\n").slice(0, LINE_TEXT_LIMIT);
+}
+
+async function pushLineTextToKnownTargets(text) {
+  const targets = await getKnownLinePushTargets();
+  let sent = 0;
+  let failed = 0;
+
+  for (const target of targets) {
+    try {
+      await client.pushMessage(
+        target.targetId,
+        normalizeLineMessage({ type: "text", text })
+      );
+      sent++;
+    } catch (err) {
+      failed++;
+      console.error("LINE earthquake push failed:", {
+        targetType: target.targetType,
+        targetId: target.targetId,
+        statusCode: err?.statusCode,
+        statusMessage: err?.statusMessage,
+        data: getLineErrorData(err),
+      });
+    }
+  }
+
+  return {
+    targetCount: targets.length,
+    sent,
+    failed,
   };
 }
 
@@ -8445,6 +8661,70 @@ app.get("/api/update-stocks", async (req, res) => {
       sources: debug,
     },
   });
+});
+
+app.get("/api/check-earthquake", async (req, res) => {
+  if (!isCronAuthorized(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  const force = String(req.query?.force || "").trim() === "1";
+  const notifyFirst = String(req.query?.notifyFirst || "").trim() === "1";
+
+  try {
+    const rawEvents = await fetchCwaSignificantEarthquakes();
+    const latest = pickLatestEarthquake(rawEvents);
+    if (!latest) {
+      return res.json({
+        ok: true,
+        pushed: false,
+        reason: "no-earthquake-report",
+        count: rawEvents.length,
+      });
+    }
+
+    const lastPushedId = await redisGet(CWA_EARTHQUAKE_LAST_PUSHED_KEY);
+    const isFirstRun = !lastPushedId;
+    if (!force && lastPushedId && lastPushedId === latest.id) {
+      return res.json({
+        ok: true,
+        pushed: false,
+        reason: "duplicate",
+        eventId: latest.id,
+        earthquake: latest,
+      });
+    }
+
+    if (!force && isFirstRun && !notifyFirst) {
+      await redisSet(CWA_EARTHQUAKE_LAST_PUSHED_KEY, latest.id);
+      return res.json({
+        ok: true,
+        pushed: false,
+        initialized: true,
+        reason: "baseline-created",
+        eventId: latest.id,
+        earthquake: latest,
+      });
+    }
+
+    const text = formatEarthquakePushText(latest);
+    const pushStats = await pushLineTextToKnownTargets(text);
+    await redisSet(CWA_EARTHQUAKE_LAST_PUSHED_KEY, latest.id);
+
+    return res.json({
+      ok: true,
+      pushed: pushStats.sent > 0,
+      eventId: latest.id,
+      earthquake: latest,
+      ...pushStats,
+    });
+  } catch (err) {
+    console.error("Earthquake check failed:", err);
+    return res.status(500).json({
+      ok: false,
+      error: String(err?.message || err),
+    });
+  }
 });
 
 app.get("/api/weather-locations", (req, res) => {
