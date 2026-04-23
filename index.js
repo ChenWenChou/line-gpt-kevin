@@ -4582,20 +4582,30 @@ function buildPostMarketPickComment(metrics) {
     return `${buildPostMarketStructureComment(metrics)}，但流動性偏弱，進出風險較高。`;
   }
   if (metrics.riskLevel === "型態剛轉強") {
+    if (metrics.tradeValue >= 5e8) {
+      return `${buildPostMarketLiquidityComment(
+        metrics
+      )}，型態剛轉強，適合當觀察首選。`;
+    }
     if (metrics.tradeValue >= 3e8) {
       return `${buildPostMarketStructureComment(metrics)}，${buildPostMarketLiquidityComment(
         metrics
-      )}，適合當觀察首選。`;
+      )}，可優先列入觀察。`;
     }
     if (metrics.tradeValue >= 1e8 && metrics.close >= 30) {
-      return `${buildPostMarketStructureComment(metrics)}，${buildPostMarketStockStyleComment(
+      return `${buildPostMarketStockStyleComment(
         metrics
-      )}，但波動會比大型股明顯。`;
+      )}，${buildPostMarketStructureComment(metrics)}，但波動會比大型股明顯。`;
     }
-    if (metrics.close < 25) {
-      return `${buildPostMarketStructureComment(metrics)}，${buildPostMarketStockStyleComment(
+    if (metrics.close < 25 && metrics.tradeValue >= 1e8) {
+      return `${buildPostMarketStockStyleComment(
         metrics
-      )}，偏短線資金型態。`;
+      )}，${buildPostMarketStructureComment(metrics)}，偏短線資金型態。`;
+    }
+    if (metrics.tradeValue < 1e8) {
+      return `均線結構轉強，但${buildPostMarketLiquidityComment(
+        metrics
+      )}，進出要更保守。`;
     }
     return `${buildPostMarketStructureComment(metrics)}，${buildPostMarketLiquidityComment(
       metrics
@@ -4948,10 +4958,13 @@ function formatPostMarketPicksText(payload) {
       lines.push(`判讀：${pick.riskLevel}`);
       lines.push(`產業：${formatStockIndustryName(pick.industry)}`);
       const redFlags = buildPostMarketRedFlagLabels(pick);
+      const dedupedTags = (pick.tags || []).filter(
+        (tag) => !redFlags.includes(tag)
+      );
       if (redFlags.length) {
         lines.push(`紅燈：${redFlags.join("、")}`);
       }
-      lines.push(`標籤：${(pick.tags || []).join("、") || "—"}`);
+      lines.push(`標籤：${dedupedTags.join("、") || "—"}`);
       lines.push(
         `收盤 ${fmtTWPrice(pick.close)}｜5日 ${pick.change5d.toFixed(
           1
