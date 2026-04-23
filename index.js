@@ -2168,8 +2168,10 @@ function pickLatestEarthquake(events) {
   return normalized[0] || null;
 }
 
-function formatEarthquakePushText(event) {
-  const lines = ["【顯著有感地震報告】"];
+function formatEarthquakePushText(event, { isTest = false } = {}) {
+  const lines = [
+    isTest ? "【測試功能｜顯著有感地震報告】" : "【顯著有感地震報告】",
+  ];
   if (event.reportNo) lines.push(`編號：${event.reportNo}`);
   if (event.originTime) lines.push(`發震時間：${event.originTime}`);
   if (Number.isFinite(event.magnitude)) lines.push(`芮氏規模：${event.magnitude}`);
@@ -8777,7 +8779,7 @@ app.get("/api/check-earthquake", async (req, res) => {
       });
     }
 
-    const text = formatEarthquakePushText(latest);
+    const text = formatEarthquakePushText(latest, { isTest: force });
     const pushStats = await pushLineTextToKnownTargets(text);
     await redisSet(CWA_EARTHQUAKE_LAST_PUSHED_KEY, latest.id);
 
