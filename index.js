@@ -1419,6 +1419,22 @@ function resolveTaiwanDistrict(text = "", contextCountyName = "") {
         }
       }
 
+      const prioritizedCandidate = (AMBIGUOUS_DISTRICT_PRIORITY[key] || [])
+        .map((countyName) =>
+          candidates.find((candidate) => candidate.countyName === countyName)
+        )
+        .find(Boolean);
+      if (prioritizedCandidate) {
+        return {
+          input: key,
+          displayName: prioritizedCandidate.displayName,
+          countyName: prioritizedCandidate.countyName,
+          districtName: prioritizedCandidate.displayName,
+          cwaLocationName: prioritizedCandidate.countyName,
+          matchedLevel: "district",
+        };
+      }
+
       continue;
     }
 
@@ -1888,6 +1904,15 @@ const TW_DISTRICT_LIST = TW_DISTRICT_LOOKUP.districts;
 const TW_DISTRICT_ALIAS_MAP = TW_DISTRICT_LOOKUP.aliasMap;
 const AMBIGUOUS_DISTRICT_ALIASES = TW_DISTRICT_LOOKUP.ambiguousAliases;
 const AMBIGUOUS_DISTRICT_CANDIDATES = TW_DISTRICT_LOOKUP.ambiguousCandidates;
+const AMBIGUOUS_DISTRICT_PRIORITY = {
+  信義區: ["臺北市", "基隆市"],
+  中正區: ["臺北市", "基隆市"],
+  中山區: ["臺北市", "基隆市"],
+  東區: ["臺南市", "新竹市", "嘉義市"],
+  北區: ["臺中市", "臺南市", "新竹市"],
+  南區: ["臺中市", "臺南市"],
+  西區: ["臺中市", "嘉義市"],
+};
 const TW_DISTRICT_ALIAS_KEYS = [
   ...new Set([
     ...Object.keys(TW_DISTRICT_ALIAS_MAP),
