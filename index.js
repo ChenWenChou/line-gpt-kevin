@@ -653,6 +653,7 @@ const GENERAL_REPLY_MAX_CHARS = Number(
   process.env.GENERAL_REPLY_MAX_CHARS || 260
 );
 const REMINDER_QUEUE_KEY = "reminder:due";
+const LINE_PUSH_TARGETS_KEY = "line:pushTargets";
 const REMINDER_ITEM_PREFIX = "reminder:item:";
 const REMINDER_TTL_SECONDS = Number(
   process.env.REMINDER_TTL_SECONDS || 60 * 60 * 24 * 7
@@ -1066,6 +1067,20 @@ function buildReminderTarget(event) {
     return { targetType: "room", targetId: event.source.roomId };
   }
   return null;
+}
+
+async function rememberLinePushTarget(event) {
+  const target = buildReminderTarget(event);
+  if (!target?.targetId) return false;
+
+  const payload = {
+    targetType: target.targetType,
+    targetId: target.targetId,
+    sourceType: event?.source?.type || null,
+    lastSeenAt: Date.now(),
+  };
+
+  return redisSAdd(LINE_PUSH_TARGETS_KEY, JSON.stringify(payload));
 }
 
 async function scheduleReminder(event, parsedReminder) {
@@ -7279,6 +7294,8 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         });
         continue;
       }
+
+      await rememberLinePushTarget(event);
 
       // ─────────────────────────────────────
       // 0️⃣ 群組 / 房間 gate（最外層）
