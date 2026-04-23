@@ -4512,6 +4512,32 @@ function buildPostMarketStockStyleComment(metrics) {
   return "股性偏活，進出節奏要抓得更緊";
 }
 
+function buildPostMarketRedFlagLabels(pick) {
+  const flags = [];
+  if (pick?.isDispositionStock) flags.push("處置股");
+  if (pick?.isAttentionStock) flags.push("注意股");
+  if (pick?.isFundamentallyWeak) flags.push("基本面偏弱");
+  if (pick?.isValuationExpensive) flags.push("估值偏高");
+  if (pick?.isWeakLiquidity) flags.push("流動性偏弱");
+  if (pick?.isOverheated) flags.push("過熱");
+  return [...new Set(flags)];
+}
+
+function formatLastUpdatedAtZh(isoString) {
+  if (!isoString) return null;
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat("zh-TW", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 function buildPostMarketPickComment(metrics) {
   if (metrics.isDispositionStock) {
     return "列為處置股，交易限制較多，僅適合高風險觀察。";
@@ -4556,6 +4582,21 @@ function buildPostMarketPickComment(metrics) {
     return `${buildPostMarketStructureComment(metrics)}，但流動性偏弱，進出風險較高。`;
   }
   if (metrics.riskLevel === "型態剛轉強") {
+    if (metrics.tradeValue >= 3e8) {
+      return `${buildPostMarketStructureComment(metrics)}，${buildPostMarketLiquidityComment(
+        metrics
+      )}，適合當觀察首選。`;
+    }
+    if (metrics.tradeValue >= 1e8 && metrics.close >= 30) {
+      return `${buildPostMarketStructureComment(metrics)}，${buildPostMarketStockStyleComment(
+        metrics
+      )}，但波動會比大型股明顯。`;
+    }
+    if (metrics.close < 25) {
+      return `${buildPostMarketStructureComment(metrics)}，${buildPostMarketStockStyleComment(
+        metrics
+      )}，偏短線資金型態。`;
+    }
     return `${buildPostMarketStructureComment(metrics)}，${buildPostMarketLiquidityComment(
       metrics
     )}，較適合優先觀察。`;
@@ -4797,6 +4838,7 @@ async function decoratePostMarketPicksPayload(payload) {
 
   const streakCodes = await getRecentPostMarketStreakCodes(3);
   let stockIndustryByCode = new Map();
+  let meta = null;
   try {
     const rawStocks = await redisGet(STOCKS_REDIS_KEY);
     const stocks = rawStocks ? JSON.parse(rawStocks) : {};
@@ -4810,6 +4852,12 @@ async function decoratePostMarketPicksPayload(payload) {
     );
   } catch {
     stockIndustryByCode = new Map();
+  }
+  try {
+    const rawMeta = await redisGet(STOCKS_META_REDIS_KEY);
+    meta = rawMeta ? JSON.parse(rawMeta) : null;
+  } catch {
+    meta = null;
   }
   const decorateList = (list) =>
     (Array.isArray(list) ? list : []).map((pick) => {
@@ -4827,6 +4875,7 @@ async function decoratePostMarketPicksPayload(payload) {
 
   return {
     ...payload,
+    lastUpdatedAt: payload?.lastUpdatedAt || meta?.lastUpdatedAt || null,
     recommendedPicks: decorateList(
       payload.recommendedPicks || payload.picks || []
     ),
@@ -4836,6 +4885,7 @@ async function decoratePostMarketPicksPayload(payload) {
 
 function formatPostMarketPicksText(payload) {
   const dateKey = payload?.dateKey || "--";
+  const lastUpdatedLabel = formatLastUpdatedAtZh(payload?.lastUpdatedAt);
   const recommendedPicks = Array.isArray(payload?.recommendedPicks)
     ? payload.recommendedPicks.map(normalizePostMarketPick)
     : [];
@@ -4846,6 +4896,7 @@ function formatPostMarketPicksText(payload) {
   const lines = [
     `📌 今日盤後推薦股（${dateKey}）`,
     "依趨勢、量能、流動性與風險過濾",
+    ...(lastUpdatedLabel ? [`資料更新：${lastUpdatedLabel}`] : []),
     "",
     "【主推薦】",
   ];
@@ -4896,6 +4947,10 @@ function formatPostMarketPicksText(payload) {
       );
       lines.push(`判讀：${pick.riskLevel}`);
       lines.push(`產業：${formatStockIndustryName(pick.industry)}`);
+      const redFlags = buildPostMarketRedFlagLabels(pick);
+      if (redFlags.length) {
+        lines.push(`紅燈：${redFlags.join("、")}`);
+      }
       lines.push(`標籤：${(pick.tags || []).join("、") || "—"}`);
       lines.push(
         `收盤 ${fmtTWPrice(pick.close)}｜5日 ${pick.change5d.toFixed(
@@ -4917,7 +4972,7 @@ function formatPostMarketPicksText(payload) {
 
   lines.push("");
   lines.push(
-    "條件：5~40元、5MA>20MA、站上20MA、5/20日漲幅為正、量能放大、排除ETF；主推薦另加流動性、過熱、近四季EPS、本益比與注意/處置股過濾"
+    "條件：技術面轉強，並排除過熱、近四季EPS偏弱、估值偏高與注意/處置股。"
   );
   return lines.join("\n");
 }
