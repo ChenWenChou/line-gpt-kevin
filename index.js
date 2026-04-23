@@ -3055,6 +3055,8 @@ function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
   const sourceText =
     data?.source === "aztro"
       ? "資料來源：aztro API，AI 中文整理，娛樂參考"
+      : data?.source === "freehoroscopeapi"
+      ? "資料來源：FreeHoroscopeAPI，AI 中文整理，娛樂參考"
       : "資料來源：AI 備援生成，娛樂參考";
 
   return {
@@ -3194,7 +3196,60 @@ async function fetchAztroHoroscope(signEn, when) {
   return data;
 }
 
-async function localizeAztroHoroscope({ signZh, whenLabel, raw }) {
+async function fetchFreeHoroscopeApi(signEn, when) {
+  const day = getAztroDay(when);
+  const url = `https://freehoroscopeapi.com/api/v1/get-horoscope/daily?sign=${encodeURIComponent(
+    signEn
+  )}${day === "tomorrow" ? "&day=tomorrow" : ""}`;
+  const json = await fetchJsonWithTimeout(
+    url,
+    {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+      },
+    },
+    9000
+  );
+  const data = json?.data || json;
+  if (!data?.horoscope) {
+    throw new Error("FreeHoroscopeAPI response missing horoscope");
+  }
+  return {
+    current_date: data.date || null,
+    mood: "",
+    compatibility: "",
+    lucky_number: "",
+    lucky_time: "",
+    color: "",
+    date_range: "",
+    description: data.horoscope,
+    sourceApi: "freehoroscopeapi",
+  };
+}
+
+async function fetchExternalHoroscope(signEn, when) {
+  try {
+    const raw = await fetchAztroHoroscope(signEn, when);
+    return {
+      raw: {
+        ...raw,
+        sourceApi: "aztro",
+      },
+      source: "aztro",
+    };
+  } catch (err) {
+    console.warn("Aztro horoscope API failed:", err?.message || err);
+  }
+
+  const raw = await fetchFreeHoroscopeApi(signEn, when);
+  return {
+    raw,
+    source: "freehoroscopeapi",
+  };
+}
+
+async function localizeExternalHoroscope({ signZh, whenLabel, raw }) {
   const res = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     response_format: { type: "json_object" },
@@ -3207,11 +3262,11 @@ async function localizeAztroHoroscope({ signZh, whenLabel, raw }) {
       {
         role: "user",
         content: `
-請把以下 Aztro API 的每日星座資料整理成 LINE 卡片內容。
+請把以下外部每日星座資料整理成 LINE 卡片內容。
 
 星座：${signZh}
 時間：${whenLabel}
-API 原始資料：
+外部資料：
 ${JSON.stringify(raw)}
 
 請回傳 JSON，格式：
@@ -3232,7 +3287,7 @@ ${JSON.stringify(raw)}
 
 規則：
 - overallStars 必須依照原始 description 的順逆感評 1~5，不可固定。
-- luckyNumber / luckyTime / color / compatibility 優先沿用 API。
+- luckyNumber / luckyTime / color / compatibility 若外部資料有提供就優先沿用；沒有就合理留空或補娛樂值。
 - 文字要像每日星座網站，但不要太空泛。
 - 不要提到 AI、API、英文原文。
 `,
@@ -3318,10 +3373,12 @@ async function getDailyHoroscope(signZh, when = "today") {
   let data = null;
   let source = "aztro";
   try {
-    raw = await fetchAztroHoroscope(sign, when);
-    data = await localizeAztroHoroscope({ signZh, whenLabel, raw });
+    const external = await fetchExternalHoroscope(sign, when);
+    raw = external.raw;
+    source = external.source;
+    data = await localizeExternalHoroscope({ signZh, whenLabel, raw });
   } catch (err) {
-    console.warn("Aztro horoscope failed, fallback to OpenAI:", err?.message || err);
+    console.warn("External horoscope failed, fallback to OpenAI:", err?.message || err);
     source = "openai-fallback";
     data = await buildFallbackHoroscope(signZh, whenLabel);
   }
