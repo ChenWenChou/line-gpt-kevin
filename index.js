@@ -3043,35 +3043,19 @@ const ZODIAC_MAP = {
 };
 
 function getTodayKey(offset = 0) {
-  const d = new Date();
-  d.setDate(d.getDate() + offset);
-  return d.toISOString().slice(0, 10);
+  return taipeiDateKey(Date.now() + offset * 24 * 60 * 60 * 1000);
 }
 function renderStars(n = 0) {
-  return "★".repeat(n) + "☆".repeat(5 - n);
-}
-function calcStar(date, signEn) {
-  // 簡單 deterministic hash
-  const base = [...(date + signEn)].reduce((a, c) => a + c.charCodeAt(0), 0);
-  return (base % 5) + 1; // 1~5
-}
-
-function calcLuckyNumber(date, signEn) {
-  // 先把日期變成穩定數字（YYYY-MM-DD）
-  const dateBase = date.replace(/-/g, "");
-  let seed = parseInt(dateBase, 10);
-
-  // 星座影響（小幅偏移）
-  for (const c of signEn) {
-    seed += c.charCodeAt(0);
-  }
-
-  // 轉成 1~99
-  return (seed % 99) + 1;
+  const safeN = Math.max(1, Math.min(5, Math.round(Number(n) || 3)));
+  return "★".repeat(safeN) + "☆".repeat(5 - safeN);
 }
 
 function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
   const imageUrl = `https://raw.githubusercontent.com/ChenWenChou/line-gpt-kevin/main/public/image/${signEn}.png`;
+  const sourceText =
+    data?.source === "aztro"
+      ? "資料來源：aztro API，AI 中文整理，娛樂參考"
+      : "資料來源：AI 備援生成，娛樂參考";
 
   return {
     type: "flex",
@@ -3099,45 +3083,222 @@ function buildHoroscopeFlexV2({ signZh, signEn, whenLabel, data }) {
           },
           {
             type: "text",
-            text: renderStars(data.overall ?? 0),
+            text: `整體 ${renderStars(data.overallStars ?? 3)}｜${data.mood ?? "平穩"}`,
             size: "lg",
             color: "#F5A623",
+            wrap: true,
+          },
+          {
+            type: "text",
+            text: data.overall ?? "今天適合照自己的節奏走，別被外界牽著跑。",
+            wrap: true,
+            color: "#444444",
           },
           { type: "separator" },
 
           {
             type: "text",
-            text: `💼 工作：${data.work ?? "今日適合穩定推進"}`,
+            text: `💼 工作：${data.work ?? "先處理最卡的一件事。"}`,
             wrap: true,
           },
           {
             type: "text",
-            text: `❤️ 感情：${data.love ?? "多一點體貼就很加分"}`,
+            text: `❤️ 感情：${data.love ?? "少猜測，直接說需求會更順。"}`,
             wrap: true,
           },
           {
             type: "text",
-            text: `💰 財運：${data.money ?? "保守理財較安心"}`,
+            text: `💰 財運：${data.money ?? "消費前先等一下，避免情緒下單。"}`,
             wrap: true,
           },
           {
             type: "text",
-            text: `🎯 幸運數字：${data.luckyNumber ?? "-"}`,
+            text: `🩺 健康：${data.health ?? "留意作息與精神消耗。"}`,
+            wrap: true,
+          },
+          {
+            type: "text",
+            text: `🎯 幸運色：${data.luckyColor ?? "-"}｜數字：${data.luckyNumber ?? "-"}`,
             wrap: true,
             weight: "bold",
+          },
+          {
+            type: "text",
+            text: `🕒 幸運時間：${data.luckyTime ?? "-"}｜速配：${data.compatibility ?? "-"}`,
+            wrap: true,
+            size: "sm",
+            color: "#555555",
           },
 
           { type: "separator", margin: "md" },
           {
             type: "text",
-            text: "※ 我無法知道星相，跟國師會有落差！",
+            text: `今日提醒：${data.advice ?? "把重點放在能控制的事情上。"}`,
+            size: "sm",
+            wrap: true,
+            color: "#333333",
+          },
+          {
+            type: "text",
+            text: `※ ${sourceText}`,
             size: "xs",
-            color: "#ff0741",
+            color: "#888888",
+            wrap: true,
           },
         ],
       },
     },
   };
+}
+
+function parseJsonObjectFromText(text) {
+  const raw = String(text || "").trim();
+  const unfenced = raw
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  try {
+    return JSON.parse(unfenced);
+  } catch {
+    const start = unfenced.indexOf("{");
+    const end = unfenced.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      return JSON.parse(unfenced.slice(start, end + 1));
+    }
+    throw new Error("JSON object not found");
+  }
+}
+
+function getAztroDay(when) {
+  return when === "tomorrow" ? "tomorrow" : "today";
+}
+
+async function fetchAztroHoroscope(signEn, when) {
+  const day = getAztroDay(when);
+  const url = `https://aztro.sameerkumar.website/?sign=${encodeURIComponent(
+    signEn
+  )}&day=${encodeURIComponent(day)}`;
+  const data = await fetchJsonWithTimeout(
+    url,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+      },
+    },
+    9000
+  );
+  if (!data?.description) {
+    throw new Error("Aztro horoscope response missing description");
+  }
+  return data;
+}
+
+async function localizeAztroHoroscope({ signZh, whenLabel, raw }) {
+  const res = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content:
+          "你是繁體中文星座內容編輯。根據外部星座 API 的英文資料整理成自然中文。不要宣稱準確預測，不要新增恐嚇或保證。只回 JSON。",
+      },
+      {
+        role: "user",
+        content: `
+請把以下 Aztro API 的每日星座資料整理成 LINE 卡片內容。
+
+星座：${signZh}
+時間：${whenLabel}
+API 原始資料：
+${JSON.stringify(raw)}
+
+請回傳 JSON，格式：
+{
+  "overallStars": 1,
+  "mood": "2~6字中文心情",
+  "overall": "整體運勢，35字內",
+  "work": "工作運，35字內",
+  "love": "感情運，35字內",
+  "money": "財運，35字內",
+  "health": "健康提醒，35字內",
+  "advice": "今日提醒，35字內",
+  "luckyColor": "中文顏色",
+  "luckyNumber": "沿用 API 數字",
+  "luckyTime": "沿用 API 時間並中文化",
+  "compatibility": "中文星座"
+}
+
+規則：
+- overallStars 必須依照原始 description 的順逆感評 1~5，不可固定。
+- luckyNumber / luckyTime / color / compatibility 優先沿用 API。
+- 文字要像每日星座網站，但不要太空泛。
+- 不要提到 AI、API、英文原文。
+`,
+      },
+    ],
+    max_tokens: 500,
+  });
+
+  const localized = parseJsonObjectFromText(res.choices[0].message.content);
+  return {
+    overallStars: Math.max(
+      1,
+      Math.min(5, Math.round(Number(localized.overallStars) || 3))
+    ),
+    mood: String(localized.mood || raw.mood || "平穩").trim(),
+    overall: String(localized.overall || raw.description || "").trim(),
+    work: String(localized.work || "工作先求穩，再慢慢推進。").trim(),
+    love: String(localized.love || "互動放自然一點，別急著定義。").trim(),
+    money: String(localized.money || "財務適合保守，少做衝動決定。").trim(),
+    health: String(localized.health || "留意精神消耗與休息品質。").trim(),
+    advice: String(localized.advice || "今天先顧好自己的節奏。").trim(),
+    luckyColor: String(localized.luckyColor || raw.color || "-").trim(),
+    luckyNumber: String(localized.luckyNumber || raw.lucky_number || "-").trim(),
+    luckyTime: String(localized.luckyTime || raw.lucky_time || "-").trim(),
+    compatibility: String(
+      localized.compatibility || raw.compatibility || "-"
+    ).trim(),
+  };
+}
+
+async function buildFallbackHoroscope(signZh, whenLabel) {
+  const res = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content:
+          "你是繁體中文星座內容編輯。外部星座資料暫時不可用時，請用星座性格寫娛樂型每日提醒。只回 JSON。",
+      },
+      {
+        role: "user",
+        content: `
+請產生「${whenLabel}${signZh}座」娛樂型每日提醒。
+JSON 欄位同下：
+{
+  "overallStars": 1,
+  "mood": "",
+  "overall": "",
+  "work": "",
+  "love": "",
+  "money": "",
+  "health": "",
+  "advice": "",
+  "luckyColor": "",
+  "luckyNumber": "",
+  "luckyTime": "",
+  "compatibility": ""
+}
+每句 35 字內，不要保證，不要太空泛。
+`,
+      },
+    ],
+    max_tokens: 500,
+  });
+  return parseJsonObjectFromText(res.choices[0].message.content);
 }
 
 async function getDailyHoroscope(signZh, when = "today") {
@@ -3146,62 +3307,31 @@ async function getDailyHoroscope(signZh, when = "today") {
 
   const date = when === "tomorrow" ? getTodayKey(1) : getTodayKey(0);
 
-  const kvKey = `horoscope:v5:${date}:${sign}`;
+  const kvKey = `horoscope:v6:${date}:${sign}:${getAztroDay(when)}`;
 
   // ① 先查 KV
   const cached = await redisGet(kvKey);
   if (cached) return JSON.parse(cached);
 
-  // ② 沒有才問 GPT（只會發生一次）
   const whenLabel = when === "tomorrow" ? "明日" : "今日";
-
-  const res = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content:
-          "你是理性、不渲染極端的星座運勢撰寫者，避免極端好壞、避免保證性語句、同時帶點生活詼諧幽默感。請只回傳 JSON，不要多任何文字。",
-      },
-      {
-        role: "user",
-        content: `
-請產生「${whenLabel}${signZh}座」運勢。
-請明顯反映「${signZh}座的典型性格」。
-
-格式：
-{
-  "work": "...",
-  "love": "...",
-  "money": "..."
-}
-
-限制：
-- 每句 20 字內
-- 不要過度中性
-- 同一天不同星座請有明顯差異
-`,
-      },
-    ],
-    max_tokens: 200,
-  });
-
-  const text = res.choices[0].message.content.trim();
-
-  let data;
+  let raw = null;
+  let data = null;
+  let source = "aztro";
   try {
-    data = JSON.parse(res.choices[0].message.content);
-  } catch {
-    throw new Error("Horoscope JSON parse failed");
+    raw = await fetchAztroHoroscope(sign, when);
+    data = await localizeAztroHoroscope({ signZh, whenLabel, raw });
+  } catch (err) {
+    console.warn("Aztro horoscope failed, fallback to OpenAI:", err?.message || err);
+    source = "openai-fallback";
+    data = await buildFallbackHoroscope(signZh, whenLabel);
   }
-  const overall = calcStar(date, sign);
-  const luckyNumber = calcLuckyNumber(date, sign);
 
   const payload = {
     sign: signZh,
     when,
-    overall,
-    luckyNumber,
+    source,
+    sourceDate: raw?.current_date || date,
+    raw,
     ...data,
   };
 
