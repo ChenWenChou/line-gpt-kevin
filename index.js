@@ -8399,7 +8399,11 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
         if (results.length > 1) {
           lines.push("");
-          lines.push(`合計約 ${totalMin}～${totalMax} 大卡`);
+          lines.push(
+            totalMin === totalMax
+              ? `合計約 ${totalMax} 大卡`
+              : `合計約 ${totalMin}～${totalMax} 大卡`
+          );
         }
 
         const sourceLabels = new Set(
