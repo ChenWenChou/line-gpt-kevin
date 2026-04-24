@@ -3571,6 +3571,12 @@ const LOCAL_TW_FOOD_CALORIE_DB = [
     note: "內餡、油條與飯量是主要差異。",
   },
   {
+    aliases: ["鮪魚飯糰"],
+    min: 330,
+    max: 460,
+    note: "美乃滋與飯量不同，熱量會再往上。",
+  },
+  {
     aliases: ["蘿蔔糕"],
     min: 220,
     max: 320,
@@ -3587,6 +3593,132 @@ const LOCAL_TW_FOOD_CALORIE_DB = [
     min: 180,
     max: 260,
     note: "內餡與大小不同，熱量差距不小。",
+  },
+  {
+    aliases: ["小籠包"],
+    min: 350,
+    max: 500,
+    note: "以一籠常見份量估算。",
+  },
+  {
+    aliases: ["牛肉麵"],
+    min: 550,
+    max: 800,
+    note: "湯頭油脂、麵量與牛肉份量差很多。",
+  },
+  {
+    aliases: ["陽春麵"],
+    min: 300,
+    max: 450,
+    note: "油蔥與麵量不同會有差異。",
+  },
+  {
+    aliases: ["乾麵"],
+    min: 350,
+    max: 550,
+    note: "醬料與麵量是主要差異。",
+  },
+  {
+    aliases: ["滷味"],
+    min: 250,
+    max: 600,
+    note: "配料差異很大，僅適合粗估。",
+  },
+  {
+    aliases: ["臭豆腐"],
+    min: 350,
+    max: 550,
+    note: "炸或蒸、醬料與泡菜量都會影響。",
+  },
+  {
+    aliases: ["鹹酥雞"],
+    min: 450,
+    max: 700,
+    note: "份量與是否搭配配料差很多。",
+  },
+  {
+    aliases: ["蔥抓餅"],
+    min: 300,
+    max: 450,
+    note: "油量與是否加蛋差異不小。",
+  },
+  {
+    aliases: ["蔥抓餅加蛋"],
+    min: 380,
+    max: 520,
+    note: "加蛋與醬料後通常會再往上。",
+  },
+  {
+    aliases: ["漢堡"],
+    min: 280,
+    max: 450,
+    note: "肉排、醬料與起司會影響差距。",
+  },
+  {
+    aliases: ["三明治"],
+    min: 220,
+    max: 380,
+    note: "內餡與美乃滋差異最大。",
+  },
+  {
+    aliases: ["吐司夾蛋", "蛋吐司"],
+    min: 250,
+    max: 380,
+    note: "是否抹醬與吐司片數會影響。",
+  },
+  {
+    aliases: ["茶葉蛋"],
+    min: 65,
+    max: 85,
+    note: "通常與一般雞蛋熱量接近。",
+  },
+  {
+    aliases: ["荷包蛋"],
+    min: 90,
+    max: 120,
+    note: "煎油量是主要差異。",
+  },
+  {
+    aliases: ["白吐司"],
+    min: 70,
+    max: 100,
+    note: "以一片常見份量估算。",
+  },
+  {
+    aliases: ["白飯"],
+    min: 230,
+    max: 320,
+    note: "以一碗常見份量估算。",
+  },
+  {
+    aliases: ["地瓜球"],
+    min: 250,
+    max: 400,
+    note: "份量與裹糖會影響不少。",
+  },
+  {
+    aliases: ["紅茶"],
+    min: 80,
+    max: 180,
+    note: "甜度與容量是主要差異。",
+  },
+  {
+    aliases: ["綠茶"],
+    min: 0,
+    max: 120,
+    note: "無糖幾乎很低，有糖會往上。",
+  },
+  {
+    aliases: ["咖啡"],
+    min: 5,
+    max: 180,
+    note: "黑咖啡很低，加糖奶精後會往上。",
+  },
+  {
+    aliases: ["拿鐵"],
+    min: 120,
+    max: 250,
+    note: "奶量、糖量與容量差異最大。",
   },
   {
     aliases: ["炒飯"],
@@ -3629,12 +3761,24 @@ const LOCAL_TW_FOOD_CALORIE_DB = [
 const USDA_QUERY_ALIAS_MAP = {
   雞蛋: "egg",
   蛋: "egg",
+  茶葉蛋: "egg",
+  荷包蛋: "fried egg",
   香蕉: "banana",
   蘋果: "apple",
+  柳丁: "orange",
+  橘子: "orange",
+  葡萄: "grapes",
+  草莓: "strawberries",
+  藍莓: "blueberries",
   牛奶: "milk",
   豆漿: "soy milk",
   雞胸肉: "chicken breast",
   雞胸: "chicken breast",
+  雞腿: "chicken leg",
+  牛肉: "beef",
+  豬肉: "pork",
+  鮭魚: "salmon",
+  鮪魚: "tuna",
   白飯: "white rice cooked",
   糙米飯: "brown rice cooked",
   燕麥: "oats",
@@ -3642,26 +3786,46 @@ const USDA_QUERY_ALIAS_MAP = {
   馬鈴薯: "potato",
   優格: "yogurt",
   吐司: "toast",
+  白吐司: "white bread",
+  花生醬: "peanut butter",
+  起司: "cheese",
+  豆腐: "tofu",
+  高麗菜: "cabbage",
+  青花菜: "broccoli",
+  花椰菜: "broccoli",
+  番茄: "tomato",
+  小黃瓜: "cucumber",
+  胡蘿蔔: "carrot",
+  玉米: "corn",
+  水餃: "dumpling",
+  麵條: "noodles",
+  白麵: "noodles",
+  義大利麵: "spaghetti cooked",
 };
 
 function normalizeFoodName(food) {
   return String(food || "")
     .trim()
     .replace(/^(幫我算|幫我估|請問|我今天|我剛剛|我有|我吃了|我喝了)/g, "")
-    .replace(/(熱量|卡路里|大卡|幾卡|多少卡|是多少)$/g, "")
+    .replace(/(熱量|卡路里|大卡|幾卡|多少卡|是多少|大約|約)$/g, "")
+    .replace(/^(一個|一顆|一份|一杯|一碗|一盤|一盒|一條)/, "")
     .replace(/[（）()]/g, "")
     .replace(/\s+/g, "")
     .trim();
 }
 
 function parseFoodList(text) {
-  // 常見分隔符號
   return text
     .replace(/^(助理|KevinBot|kevinbot)\s*/i, "")
     .replace(/我(今天|剛剛)?吃了/g, "")
     .replace(/我(今天|剛剛)?喝了/g, "")
     .replace(/(熱量|卡路里|大卡|幾卡|多少卡|是多少)/g, "")
-    .split(/、|,|，|跟|和|\n/)
+    .replace(/加/g, "、")
+    .replace(/\+/g, "、")
+    .replace(/外加/g, "、")
+    .replace(/再來一份/g, "、")
+    .replace(/配/g, "、")
+    .split(/、|,|，|跟|和|以及|\n/)
     .map((s) => normalizeFoodName(s))
     .filter(Boolean);
 }
