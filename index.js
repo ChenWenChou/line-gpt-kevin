@@ -558,6 +558,7 @@ const OPENCLAW_TIMEOUT_MS_SIMPLE = Number(
 );
 const OPENCLAW_TIMEOUT_MS = Number(process.env.OPENCLAW_TIMEOUT_MS || 20000);
 const OPENCLAW_RETRY_MODEL = process.env.OPENCLAW_RETRY_MODEL || "";
+const USDA_API_KEY = String(process.env.USDA_API_KEY || "").trim();
 const OPENCLAW_RETRY_TIMEOUT_MS = Number(
   process.env.OPENCLAW_RETRY_TIMEOUT_MS || 12000
 );
@@ -3520,52 +3521,315 @@ async function getDailyHoroscope(signZh, when = "today") {
 }
 
 // 計算熱量
+const LOCAL_TW_FOOD_CALORIE_DB = [
+  {
+    aliases: ["雞腿便當", "炸雞腿便當", "滷雞腿便當"],
+    min: 700,
+    max: 900,
+    note: "主要差在配菜、炸或滷、飯量多寡。",
+  },
+  {
+    aliases: ["排骨便當", "炸排骨便當", "滷排骨便當"],
+    min: 750,
+    max: 950,
+    note: "排骨做法與白飯份量差異最大。",
+  },
+  {
+    aliases: ["滷肉飯", "魯肉飯"],
+    min: 450,
+    max: 650,
+    note: "肥肉比例、滷汁與份量會拉開差距。",
+  },
+  {
+    aliases: ["雞排", "炸雞排"],
+    min: 500,
+    max: 700,
+    note: "厚度、裹粉與油量會影響很多。",
+  },
+  {
+    aliases: ["鹽酥雞"],
+    min: 450,
+    max: 700,
+    note: "份量、是否加九層塔與配料差異很大。",
+  },
+  {
+    aliases: ["蛋餅", "原味蛋餅"],
+    min: 250,
+    max: 350,
+    note: "餅皮大小、油量與醬料會影響熱量。",
+  },
+  {
+    aliases: ["起司蛋餅"],
+    min: 320,
+    max: 430,
+    note: "起司與醬料會再往上加。",
+  },
+  {
+    aliases: ["飯糰"],
+    min: 300,
+    max: 450,
+    note: "內餡、油條與飯量是主要差異。",
+  },
+  {
+    aliases: ["蘿蔔糕"],
+    min: 220,
+    max: 320,
+    note: "煎油量與份量會影響區間。",
+  },
+  {
+    aliases: ["鍋貼", "一份鍋貼"],
+    min: 350,
+    max: 500,
+    note: "以一份約 5 到 6 顆估算。",
+  },
+  {
+    aliases: ["水煎包"],
+    min: 180,
+    max: 260,
+    note: "內餡與大小不同，熱量差距不小。",
+  },
+  {
+    aliases: ["炒飯"],
+    min: 600,
+    max: 850,
+    note: "油量與配料會讓熱量差很多。",
+  },
+  {
+    aliases: ["炒麵"],
+    min: 500,
+    max: 750,
+    note: "麵量與油量是主要變因。",
+  },
+  {
+    aliases: ["珍珠奶茶", "珍奶"],
+    min: 350,
+    max: 550,
+    note: "甜度、容量與珍珠份量影響最大。",
+  },
+  {
+    aliases: ["奶茶"],
+    min: 180,
+    max: 350,
+    note: "全糖大杯會明顯更高。",
+  },
+  {
+    aliases: ["無糖豆漿"],
+    min: 90,
+    max: 150,
+    note: "以中杯到大杯常見容量估算。",
+  },
+  {
+    aliases: ["豆漿"],
+    min: 120,
+    max: 220,
+    note: "是否加糖與容量會拉開差距。",
+  },
+];
+
+const USDA_QUERY_ALIAS_MAP = {
+  雞蛋: "egg",
+  蛋: "egg",
+  香蕉: "banana",
+  蘋果: "apple",
+  牛奶: "milk",
+  豆漿: "soy milk",
+  雞胸肉: "chicken breast",
+  雞胸: "chicken breast",
+  白飯: "white rice cooked",
+  糙米飯: "brown rice cooked",
+  燕麥: "oats",
+  地瓜: "sweet potato",
+  馬鈴薯: "potato",
+  優格: "yogurt",
+  吐司: "toast",
+};
+
+function normalizeFoodName(food) {
+  return String(food || "")
+    .trim()
+    .replace(/^(幫我算|幫我估|請問|我今天|我剛剛|我有|我吃了|我喝了)/g, "")
+    .replace(/(熱量|卡路里|大卡|幾卡|多少卡|是多少)$/g, "")
+    .replace(/[（）()]/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+}
+
 function parseFoodList(text) {
   // 常見分隔符號
   return text
     .replace(/^(助理|KevinBot|kevinbot)\s*/i, "")
     .replace(/我(今天|剛剛)?吃了/g, "")
+    .replace(/我(今天|剛剛)?喝了/g, "")
+    .replace(/(熱量|卡路里|大卡|幾卡|多少卡|是多少)/g, "")
     .split(/、|,|，|跟|和|\n/)
-    .map((s) => s.trim())
+    .map((s) => normalizeFoodName(s))
     .filter(Boolean);
+}
+
+function findLocalTwFoodCalorie(food) {
+  const normalized = normalizeFoodName(food);
+  if (!normalized) return null;
+
+  for (const item of LOCAL_TW_FOOD_CALORIE_DB) {
+    if (item.aliases.some((alias) => normalizeFoodName(alias) === normalized)) {
+      return {
+        food,
+        min: item.min,
+        max: item.max,
+        note: item.note,
+        source: "local-tw",
+      };
+    }
+  }
+
+  return null;
+}
+
+function getUsdaQuery(food) {
+  const normalized = normalizeFoodName(food);
+  return USDA_QUERY_ALIAS_MAP[normalized] || "";
+}
+
+function extractUsdaCalories(food) {
+  const labelCalories = food?.labelNutrients?.calories?.value;
+  if (Number.isFinite(labelCalories)) return Number(labelCalories);
+
+  const nutrients = Array.isArray(food?.foodNutrients) ? food.foodNutrients : [];
+  for (const nutrient of nutrients) {
+    const name = String(
+      nutrient?.nutrientName ||
+        nutrient?.nutrient?.name ||
+        nutrient?.name ||
+        ""
+    ).toLowerCase();
+    const value = Number(
+      nutrient?.value ?? nutrient?.amount ?? nutrient?.nutrientValue
+    );
+    if (name.includes("energy") && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function getUsdaServingText(food) {
+  if (
+    Number.isFinite(food?.servingSize) &&
+    String(food?.servingSizeUnit || "").trim()
+  ) {
+    return `${food.servingSize}${food.servingSizeUnit}`;
+  }
+  if (String(food?.householdServingFullText || "").trim()) {
+    return String(food.householdServingFullText).trim();
+  }
+  return "每份";
+}
+
+async function fetchUsdaFoodCalorie(food) {
+  if (!USDA_API_KEY) return null;
+
+  const query = getUsdaQuery(food);
+  if (!query) return null;
+
+  const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(
+    USDA_API_KEY
+  )}`;
+  const json = await fetchJsonWithTimeout(
+    url,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        query,
+        pageSize: 3,
+      }),
+    },
+    10000
+  );
+
+  const foods = Array.isArray(json?.foods) ? json.foods : [];
+  const first = foods[0];
+  if (!first) return null;
+
+  const calories = extractUsdaCalories(first);
+  if (!Number.isFinite(calories)) return null;
+
+  return {
+    food,
+    min: Math.max(0, Math.round(calories)),
+    max: Math.max(0, Math.round(calories)),
+    note: `參考 USDA 資料，${getUsdaServingText(first)}估算。`,
+    source: "usda",
+  };
 }
 
 async function estimateFoodCalorie(food) {
   const today = getTodayKey(0);
-  const key = `food:estimate:${today}:${food}`;
+  const normalizedFood = normalizeFoodName(food);
+  const key = `food:v2:estimate:${today}:${normalizedFood}`;
 
   const cached = await redisGet(key);
   if (cached) return JSON.parse(cached);
 
+  const localEstimate = findLocalTwFoodCalorie(food);
+  if (localEstimate) {
+    await redisSet(key, JSON.stringify(localEstimate), "EX", 60 * 60 * 24);
+    return localEstimate;
+  }
+
+  try {
+    const usdaEstimate = await fetchUsdaFoodCalorie(food);
+    if (usdaEstimate) {
+      await redisSet(key, JSON.stringify(usdaEstimate), "EX", 60 * 60 * 24);
+      return usdaEstimate;
+    }
+  } catch (err) {
+    console.warn("USDA calorie lookup failed:", err?.message || err);
+  }
+
   const res = await openai.chat.completions.create({
     model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
         content:
-          "你是生活型熱量估算助理，只能提供『熱量區間』，不可給精準數字。請只回 JSON。",
+          "你是生活型熱量估算助理，只能提供熱量區間，不可假裝精準營養標示。請只回 JSON。",
       },
       {
         role: "user",
         content: `
 請估算以下食物的熱量區間（台灣常見份量）：
 
-食物：${food}
+食物：${normalizedFood}
 
 格式：
 {
-  "food": "${food}",
+  "food": "${normalizedFood}",
   "min": 0,
   "max": 0,
   "note": "一句影響因素"
 }
 `,
       },
-    ],
+      ],
     max_tokens: 150,
   });
 
-  const data = JSON.parse(res.choices[0].message.content);
+  const parsed = parseJsonObjectFromText(res.choices[0].message.content);
+  const data = {
+    food: String(parsed.food || normalizedFood).trim() || normalizedFood,
+    min: Math.max(0, Math.round(Number(parsed.min) || 0)),
+    max: Math.max(
+      Math.round(Number(parsed.min) || 0),
+      Math.round(Number(parsed.max) || Number(parsed.min) || 0)
+    ),
+    note: String(parsed.note || "份量與做法會影響實際熱量。").trim(),
+    source: "openai",
+  };
 
   await redisSet(key, JSON.stringify(data), "EX", 60 * 60 * 24);
 
@@ -7941,7 +8205,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         if (foods.length === 0) {
           await replyMessageWithFallback(event, {
             type: "text",
-            text: "你吃了什麼？可以一次列多道菜喔 😄",
+            text: "你要算什麼食物的熱量？可以一次列多樣。",
           });
           continue;
         }
@@ -7957,14 +8221,36 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           totalMax += r.max;
         }
 
-        // 文字版（先穩）
-        const lines = results.map(
-          (r) => `• ${r.food}：${r.min}～${r.max} 大卡`
-        );
+        const lines = results.map((r) => {
+          const rangeText =
+            r.min === r.max
+              ? `約 ${r.max} 大卡`
+              : `約 ${r.min}～${r.max} 大卡`;
+          return `• ${r.food}：${rangeText}`;
+        });
 
-        lines.push("");
-        lines.push(`👉 總熱量：約 ${totalMin}～${totalMax} 大卡`);
-        lines.push("※ 快速估算，非精準營養計算");
+        if (results.length === 1 && results[0]?.note) {
+          lines.push(results[0].note);
+        }
+
+        if (results.length > 1) {
+          lines.push("");
+          lines.push(`合計約 ${totalMin}～${totalMax} 大卡`);
+        }
+
+        const sourceLabels = new Set(
+          results
+            .map((r) => r?.source)
+            .filter(Boolean)
+            .map((source) =>
+              source === "local-tw"
+                ? "台灣常見份量"
+                : source === "usda"
+                ? "USDA"
+                : "AI估算"
+            )
+        );
+        lines.push(`※ 來源：${[...sourceLabels].join(" / ")}`);
 
         await replyMessageWithFallback(event, {
           type: "text",
