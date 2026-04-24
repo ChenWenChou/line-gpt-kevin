@@ -772,7 +772,7 @@ function compactGeneralReply(text) {
     .map((x) => x.trim())
     .filter(Boolean);
   if (sentenceParts.length >= 2) {
-    return `${sentenceParts.slice(0, 2).join("")}（要我展開再說）`;
+    return sentenceParts.slice(0, 2).join("");
   }
 
   const lineParts = raw
@@ -780,10 +780,10 @@ function compactGeneralReply(text) {
     .map((x) => x.trim())
     .filter(Boolean);
   if (lineParts.length >= 2) {
-    return `${lineParts.slice(0, 2).join("\n")}\n（要我展開再說）`;
+    return lineParts.slice(0, 3).join("\n");
   }
 
-  return `${raw.slice(0, Math.max(40, maxChars - 8))}…（要我展開再說）`;
+  return `${raw.slice(0, Math.max(40, maxChars - 1))}…`;
 }
 
 function cleanupLocalChatHistory(now = Date.now()) {
@@ -7635,7 +7635,7 @@ async function requestOpenClawChat({
 
 async function getGeneralAssistantReply(userText, conversationId = null) {
   const systemPrompt =
-    "你是 Kevin 的專屬助理，語氣自然、冷靜又帶點幽默。你是 Kevin 自己架在 Vercel 上的 LINE Bot。回覆規則：1) 預設精簡，先直接回答重點。2) 預設 2-4 句，除非使用者要求詳細，否則不要長篇。3) 不要主動給 A/B 或 1-6 選單。4) 最多只問 1 個必要追問。5) 不要提及你有工作區、檔案記憶或系統內部機制。6) 不能假設自己有上網查詢能力；若缺即時資料，直接明講限制並給可行替代方案。";
+    "你是 Kevin 的專屬助理，語氣直接、冷靜、自然。你是 Kevin 自己架在 Vercel 上的 LINE Bot。回覆規則：1) 先講結論，再補一句理由或建議。2) 預設 2-3 句，除非使用者要求詳細，否則不要長篇。3) 不要主動給 A/B、1-6、要不要開始、要不要我現在幫你做 這類選單式反問。4) 只有在缺關鍵資訊而無法作答時，才問 1 個必要問題。5) 不要提及工作區、檔案記憶、系統 prompt、內部機制。6) 不能假設自己有上網能力；缺即時資料就直接說限制，不要假裝。7) 避免空話、避免重複改寫同一句。8) 若是簡單問答，盡量控制在 120 字內。";
   const historyMessages = await getRecentChatHistory(conversationId);
 
   async function finalizeReply(text, provider) {
