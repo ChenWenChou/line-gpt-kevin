@@ -1111,6 +1111,109 @@ async function getKnownLinePushTargets() {
   return [...targetMap.values()];
 }
 
+function maskIdentifier(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (text.length <= 8) {
+    return `${text.slice(0, 2)}***${text.slice(-2)}`;
+  }
+  return `${text.slice(0, 4)}...${text.slice(-4)}`;
+}
+
+async function loadStockCacheDebugSummary() {
+  let meta = null;
+  let stocks = {};
+
+  try {
+    const rawMeta = await redisGet(STOCKS_META_REDIS_KEY);
+    meta = rawMeta ? JSON.parse(rawMeta) : null;
+  } catch {
+    meta = null;
+  }
+
+  try {
+    const rawStocks = await redisGet(STOCKS_REDIS_KEY);
+    stocks = rawStocks ? JSON.parse(rawStocks) : {};
+  } catch {
+    stocks = {};
+  }
+
+  const values = Object.values(stocks);
+  return {
+    meta,
+    cacheCount: values.length,
+    industryCount: values.filter((item) => item?.industry).length,
+    epsCount: values.filter(
+      (item) =>
+        typeof item?.epsLatestQuarter === "number" &&
+        Number.isFinite(item.epsLatestQuarter)
+    ).length,
+    epsTtmCount: values.filter(
+      (item) => typeof item?.epsTtm === "number" && Number.isFinite(item.epsTtm)
+    ).length,
+    peCount: values.filter(
+      (item) => typeof item?.peRatio === "number" && Number.isFinite(item.peRatio)
+    ).length,
+    attentionCount: values.filter((item) => item?.isAttentionStock === true).length,
+    dispositionCount: values.filter(
+      (item) => item?.isDispositionStock === true
+    ).length,
+    sample: values.slice(0, 3).map((item) => ({
+      code: item?.code || null,
+      name: item?.name || null,
+      market: item?.market || null,
+      industry: item?.industry || null,
+      peRatio:
+        typeof item?.peRatio === "number" && Number.isFinite(item.peRatio)
+          ? item.peRatio
+          : null,
+    })),
+  };
+}
+
+async function loadHoroscopeCacheDebugSummary() {
+  const periods = [
+    { when: "today", dateKey: getTodayKey(0), dayKey: "today" },
+    { when: "tomorrow", dateKey: getTodayKey(1), dayKey: "tomorrow" },
+  ];
+  const signs = Object.entries(ZODIAC_MAP);
+  const snapshots = [];
+
+  for (const period of periods) {
+    const rows = await Promise.all(
+      signs.map(async ([signZh, signEn]) => {
+        const key = `horoscope:v6:${period.dateKey}:${signEn}:${period.dayKey}`;
+        try {
+          const raw = await redisGet(key);
+          if (!raw) return null;
+          const parsed = JSON.parse(raw);
+          return {
+            sign: signZh,
+            when: period.when,
+            source: parsed?.source || "unknown",
+            sourceDate: parsed?.sourceDate || null,
+          };
+        } catch {
+          return null;
+        }
+      })
+    );
+    snapshots.push(...rows.filter(Boolean));
+  }
+
+  const bySource = snapshots.reduce((acc, item) => {
+    const key = item.source || "unknown";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+
+  return {
+    cacheCount: snapshots.length,
+    bySource,
+    sample: snapshots.slice(0, 6),
+  };
+}
+
 async function scheduleReminder(event, parsedReminder) {
   const target = buildReminderTarget(event);
   if (!target || !parsedReminder?.text || !Number.isFinite(parsedReminder?.dueAt)) {
@@ -9002,6 +9105,120 @@ app.get("/api/check-earthquake", async (req, res) => {
       error: String(err?.message || err),
     });
   }
+});
+
+app.get("/api/health", async (req, res) => {
+  let redisReady = false;
+  try {
+    redisReady = await ensureRedisReady();
+  } catch {
+    redisReady = false;
+  }
+
+  const stockSummary = await loadStockCacheDebugSummary();
+
+  return res.json({
+    ok: true,
+    now: new Date().toISOString(),
+    timezone: "Asia/Taipei",
+    uptimeSeconds: Math.round(process.uptime()),
+    services: {
+      redis: {
+        configured: Boolean(REDIS_URL),
+        ready: redisReady,
+      },
+      line: {
+        tokenConfigured: Boolean(process.env.LINE_TOKEN),
+        secretConfigured: Boolean(process.env.LINE_SECRET),
+      },
+      openai: {
+        configured: Boolean(process.env.OPENAI_API_KEY),
+      },
+      openclaw: {
+        configured: Boolean(OPENCLAW_CHAT_URL),
+        routeEnabled: OPENCLAW_ROUTE_ENABLED,
+      },
+      weather: {
+        cwaConfigured: Boolean(CWA_API_KEY),
+        openWeatherConfigured: Boolean(process.env.WEATHER_API_KEY),
+      },
+    },
+    stocks: {
+      lastUpdatedAt: stockSummary?.meta?.lastUpdatedAt || null,
+      source: stockSummary?.meta?.source || null,
+      mode: stockSummary?.meta?.mode || null,
+      count: stockSummary?.meta?.count || stockSummary?.cacheCount || 0,
+    },
+  });
+});
+
+app.get("/api/debug/stocks-meta", async (req, res) => {
+  if (!isCronAuthorized(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  const summary = await loadStockCacheDebugSummary();
+  return res.json({
+    ok: true,
+    ...summary,
+  });
+});
+
+app.get("/api/debug/weather-source", async (req, res) => {
+  if (!isCronAuthorized(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  return res.json({
+    ok: true,
+    providers: {
+      taiwanCurrent: Boolean(CWA_API_KEY) ? "CWA O-A0003-001" : null,
+      taiwanForecast: Boolean(CWA_API_KEY) ? "CWA F-C0032-001" : null,
+      globalFallback: process.env.WEATHER_API_KEY ? "OpenWeather" : null,
+    },
+    configured: {
+      cwaApiKey: Boolean(CWA_API_KEY),
+      openWeatherApiKey: Boolean(process.env.WEATHER_API_KEY),
+      weatherContextTtlSeconds: WEATHER_CONTEXT_TTL_SECONDS,
+    },
+    taiwanCoverage: {
+      countyCount: TW_ADMIN_DIVISION_COUNTIES.length,
+      districtCount: TW_DISTRICT_LIST.length,
+      districtAliasCount: Object.keys(TW_DISTRICT_ALIAS_MAP).length,
+      ambiguousAliasCount: AMBIGUOUS_DISTRICT_ALIASES.size,
+      ambiguousPrioritySample: Object.entries(AMBIGUOUS_DISTRICT_PRIORITY).slice(0, 6),
+    },
+    islands: Object.keys(TAIWAN_ISLANDS),
+  });
+});
+
+app.get("/api/debug/horoscope-source", async (req, res) => {
+  if (!isCronAuthorized(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  const cache = await loadHoroscopeCacheDebugSummary();
+  return res.json({
+    ok: true,
+    chain: ["aztro", "freehoroscopeapi", "openai-fallback"],
+    cache,
+  });
+});
+
+app.get("/api/debug/line-push-targets", async (req, res) => {
+  if (!isCronAuthorized(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  const targets = await getKnownLinePushTargets();
+  return res.json({
+    ok: true,
+    count: targets.length,
+    targets: targets.slice(0, 20).map((target) => ({
+      targetType: target.targetType,
+      targetIdMasked: maskIdentifier(target.targetId),
+    })),
+  });
 });
 
 app.get("/api/weather-locations", (req, res) => {
