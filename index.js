@@ -5455,6 +5455,25 @@ function countConsecutiveUpDays(closes) {
   return streak;
 }
 
+function countConsecutiveDownDays(closes) {
+  if (!Array.isArray(closes) || closes.length < 2) return 0;
+
+  let streak = 0;
+  for (let i = closes.length - 1; i > 0; i--) {
+    if (
+      typeof closes[i] !== "number" ||
+      typeof closes[i - 1] !== "number" ||
+      !Number.isFinite(closes[i]) ||
+      !Number.isFinite(closes[i - 1])
+    ) {
+      break;
+    }
+    if (closes[i] < closes[i - 1]) streak += 1;
+    else break;
+  }
+  return streak;
+}
+
 function buildPostMarketRiskLevel(metrics) {
   if (metrics.isOverheated || metrics.isWeakLiquidity) {
     return "高追價風險";
@@ -6048,6 +6067,50 @@ function buildSingleStockRiskLabel(metrics) {
   return buildPostMarketRiskLevel(metrics);
 }
 
+function adjustSingleStockInsightForRecentTrend(insight, metrics) {
+  if (!insight || !metrics) return insight;
+
+  const recentWeakness =
+    metrics.consecutiveDownDays >= 2 ||
+    metrics.change5d <= -3 ||
+    (metrics.change5d < 0 && metrics.close < metrics.ma5) ||
+    metrics.close < metrics.ma20;
+
+  if (!recentWeakness) return insight;
+
+  const nextTags = new Set(
+    (Array.isArray(insight.tags) ? insight.tags : []).filter(
+      (tag) => !["剛轉強", "續強", "接近均線"].includes(tag)
+    )
+  );
+
+  if (metrics.consecutiveDownDays >= 3) {
+    nextTags.add("連日回檔");
+  } else {
+    nextTags.add("近期走弱");
+  }
+  if (metrics.close < metrics.ma5) nextTags.add("跌破短線");
+  if (metrics.close < metrics.ma20) nextTags.add("跌破月線");
+
+  let comment = "最近幾個交易日走勢轉弱，先不要把它解讀成剛轉強。";
+  if (metrics.close < metrics.ma5 && metrics.close < metrics.ma20) {
+    comment = "最近幾個交易日已跌破短中期均線，走勢偏弱，先以保守觀察為主。";
+  } else if (metrics.consecutiveDownDays >= 3) {
+    comment = "近期已連續回檔，短線賣壓仍在，暫不適合解讀成轉強初段。";
+  } else if (metrics.change5d <= -5) {
+    comment = "近 5 日明顯回落，短線結構轉弱，先觀察止跌訊號再說。";
+  } else if (metrics.close < metrics.ma5) {
+    comment = "股價已落到短期均線下方，最近走勢偏弱，不宜直接視為續強。";
+  }
+
+  return {
+    ...insight,
+    riskLevel: "高風險觀察",
+    tags: Array.from(nextTags).slice(0, 4),
+    comment,
+  };
+}
+
 async function buildSingleStockInsight(stock) {
   if (!stock?.code) return null;
 
@@ -6106,6 +6169,7 @@ async function buildSingleStockInsight(stock) {
   const bias5 = ma5 > 0 ? (close - ma5) / ma5 : -1;
   const bias20 = ma20 > 0 ? (close - ma20) / ma20 : -1;
   const consecutiveUpDays = countConsecutiveUpDays(closes);
+  const consecutiveDownDays = countConsecutiveDownDays(closes);
   const liquidityPass = avgVol20 >= 2000 || tradeValue >= 1e8;
   const isWeakLiquidity = avgVol20 < 2000 && tradeValue < 1e8;
   const isOverheated =
@@ -6131,6 +6195,7 @@ async function buildSingleStockInsight(stock) {
     volumeRatio,
     avgVol20,
     consecutiveUpDays,
+    consecutiveDownDays,
     liquidityPass,
     isWeakLiquidity,
     isOverheated,
@@ -6143,7 +6208,7 @@ async function buildSingleStockInsight(stock) {
   };
 
   const riskLevel = buildSingleStockRiskLabel(metrics);
-  return {
+  const baseInsight = {
     riskLevel,
     industry: normalizeIndustryName(stock?.industry),
     tags: buildPostMarketTags({ ...metrics, riskLevel }),
@@ -6153,6 +6218,11 @@ async function buildSingleStockInsight(stock) {
     ma20,
     latestClose: close,
   };
+  return adjustSingleStockInsightForRecentTrend(baseInsight, {
+    ...metrics,
+    ma5,
+    ma20,
+  });
 }
 
 function adjustSingleStockInsightForIntraday(insight, quote, source) {
