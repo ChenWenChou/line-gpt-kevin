@@ -682,10 +682,56 @@ const REMINDER_MAX_RETRIES = Number(process.env.REMINDER_MAX_RETRIES || 3);
 const REMINDER_RETRY_DELAY_SECONDS = Number(
   process.env.REMINDER_RETRY_DELAY_SECONDS || 60
 );
+const RECENT_HELP_TTL_SECONDS = Number(
+  process.env.RECENT_HELP_TTL_SECONDS || 60 * 60 * 24 * 30
+);
+const RECENT_HELP_MAX_ITEMS = Number(process.env.RECENT_HELP_MAX_ITEMS || 5);
 const TAIPEI_UTC_OFFSET_MINUTES = Number(
   process.env.TAIPEI_UTC_OFFSET_MINUTES || 8 * 60
 );
 const localChatHistory = new Map();
+
+function getRecentHelpKey(kind, conversationId) {
+  if (!kind || !conversationId) return null;
+  return `recent:${kind}:${conversationId}`;
+}
+
+async function getRecentHelpItems(kind, conversationId) {
+  const key = getRecentHelpKey(kind, conversationId);
+  if (!key) return [];
+
+  try {
+    const raw = await redisGet(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed)
+      ? parsed.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+async function rememberRecentHelpItem(kind, conversationId, value) {
+  const key = getRecentHelpKey(kind, conversationId);
+  const item = String(value || "").trim();
+  if (!key || !item) return;
+
+  const current = await getRecentHelpItems(kind, conversationId);
+  const next = [item, ...current.filter((entry) => entry !== item)].slice(
+    0,
+    Number.isFinite(RECENT_HELP_MAX_ITEMS) && RECENT_HELP_MAX_ITEMS > 0
+      ? RECENT_HELP_MAX_ITEMS
+      : 5
+  );
+  await redisSet(
+    key,
+    JSON.stringify(next),
+    "EX",
+    Number.isFinite(RECENT_HELP_TTL_SECONDS) && RECENT_HELP_TTL_SECONDS > 0
+      ? RECENT_HELP_TTL_SECONDS
+      : 60 * 60 * 24 * 30
+  );
+}
 
 function getWeatherContextKey(userId) {
   if (!userId) return null;
@@ -1458,6 +1504,119 @@ function formatReminderListItem(reminder, index) {
   }
 
   return `${index}. ${reminder?.nextDueLabel || "--"}｜${reminder?.text || "未命名提醒"}`;
+}
+
+function createQuickReplyMessage(text, items = []) {
+  const quickReplyItems = items
+    .map((item) => {
+      const label = String(item?.label || "").trim();
+      const sendText = String(item?.text || "").trim();
+      if (!label || !sendText) return null;
+      return {
+        type: "action",
+        action: {
+          type: "message",
+          label: label.slice(0, 20),
+          text: sendText,
+        },
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 13);
+
+  return quickReplyItems.length
+    ? {
+        type: "text",
+        text,
+        quickReply: {
+          items: quickReplyItems,
+        },
+      }
+    : { type: "text", text };
+}
+
+async function buildWeatherHelpMessage(conversationId) {
+  const recents = await getRecentHelpItems("weather", conversationId);
+  const actions = [];
+  for (const city of recents.slice(0, 2)) {
+    actions.push({
+      label: city.length > 8 ? city.slice(0, 8) : city,
+      text: `${city}現在天氣`,
+    });
+  }
+  actions.push(
+    { label: "台北現在天氣", text: "台北現在天氣" },
+    { label: "桃園今天天氣", text: "桃園今天天氣" }
+  );
+  return createQuickReplyMessage(
+    "你可以直接問：「台北現在天氣」、「桃園明天天氣」、「信義區現在會下雨嗎」",
+    actions
+  );
+}
+
+async function buildStockHelpMessage(conversationId) {
+  const recents = await getRecentHelpItems("stock", conversationId);
+  const actions = [];
+  for (const code of recents.slice(0, 2)) {
+    actions.push({
+      label: `${code} 行情`.slice(0, 20),
+      text: `${code} 行情`,
+    });
+  }
+  actions.push(
+    { label: "今日盤後推薦股", text: "今日盤後推薦股" },
+    { label: "2330 行情", text: "2330 行情" }
+  );
+  return createQuickReplyMessage(
+    "你可以直接問：「2330 行情」、「6168 股價」、「40元內強勢股」",
+    actions
+  );
+}
+
+async function buildZodiacHelpMessage(conversationId) {
+  const recents = await getRecentHelpItems("zodiac", conversationId);
+  const actions = [];
+  for (const sign of recents.slice(0, 2)) {
+    actions.push({
+      label: `${sign}座今日運勢`.slice(0, 20),
+      text: `${sign}座今日運勢`,
+    });
+  }
+  actions.push(
+    { label: "牡羊座今日運勢", text: "牡羊座今日運勢" },
+    { label: "雙子座今日運勢", text: "雙子座今日運勢" }
+  );
+  return createQuickReplyMessage(
+    "你可以直接問：「雙子座今日運勢」、「天蠍座明日運勢」",
+    actions
+  );
+}
+
+function buildCalorieHelpMessage() {
+  return createQuickReplyMessage(
+    "你可以直接問：「雞腿便當熱量」、「蛋餅加奶茶熱量」、「我今天吃了飯糰、豆漿」",
+    [
+      { label: "雞腿便當熱量", text: "雞腿便當熱量" },
+      { label: "蛋餅熱量", text: "蛋餅熱量" },
+      { label: "珍珠奶茶熱量", text: "珍珠奶茶熱量" },
+      { label: "蛋餅加奶茶", text: "我今天吃了蛋餅加奶茶" },
+    ]
+  );
+}
+
+function buildBotCapabilityMessage() {
+  return {
+    type: "text",
+    text: [
+      "我目前可以幫你：",
+      "1. 查天氣與穿搭建議",
+      "2. 查股票行情、推薦股、線圖",
+      "3. 建立提醒、查看提醒、取消提醒",
+      "4. 看星座今日運勢",
+      "5. 估算食物熱量",
+      "6. 主動推播地震與天氣帶傘提醒",
+    ].join("\n"),
+  };
 }
 
 function isSameReminder(candidate, incoming) {
@@ -8900,6 +9059,40 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         continue;
       }
 
+      if (/^天氣幫助$/.test(parsedMessage || userMessage)) {
+        await replyMessageWithFallback(
+          event,
+          await buildWeatherHelpMessage(conversationId)
+        );
+        continue;
+      }
+
+      if (/^股票幫助$/.test(parsedMessage || userMessage)) {
+        await replyMessageWithFallback(
+          event,
+          await buildStockHelpMessage(conversationId)
+        );
+        continue;
+      }
+
+      if (/^星座幫助$/.test(parsedMessage || userMessage)) {
+        await replyMessageWithFallback(
+          event,
+          await buildZodiacHelpMessage(conversationId)
+        );
+        continue;
+      }
+
+      if (/^熱量幫助$/.test(parsedMessage || userMessage)) {
+        await replyMessageWithFallback(event, buildCalorieHelpMessage());
+        continue;
+      }
+
+      if (/^你可以幫我做什麼$/.test(parsedMessage || userMessage)) {
+        await replyMessageWithFallback(event, buildBotCapabilityMessage());
+        continue;
+      }
+
       // ─────────────────────────────────────
       // 🎴 媽祖抽籤指令
       // ─────────────────────────────────────
@@ -9019,11 +9212,13 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         }
 
         if (/分時|當日/.test(parsedMessage)) {
+          await rememberRecentHelpItem("stock", conversationId, stock.code);
           await replyStockChart(event, stock, "intraday");
           continue;
         }
 
         if (/K線|日K|日線/.test(parsedMessage)) {
+          await rememberRecentHelpItem("stock", conversationId, stock.code);
           await replyStockChart(event, stock, "daily");
           continue;
         }
@@ -9141,6 +9336,7 @@ ${analysisLines.join("\n")}${analysisLines.length ? "\n\n" : ""}${quoteSourceNot
             type: "text",
             text,
           });
+          await rememberRecentHelpItem("stock", conversationId, stock.code);
         } catch (err) {
           console.error("Stock error:", err);
           await replyMessageWithFallback(event, {
@@ -9209,6 +9405,7 @@ ${analysisLines.join("\n")}${analysisLines.length ? "\n\n" : ""}${quoteSourceNot
         });
 
         await replyMessageWithFallback(event, flex);
+        await rememberRecentHelpItem("zodiac", conversationId, signZh);
 
         continue;
       }
@@ -9232,6 +9429,11 @@ ${analysisLines.join("\n")}${analysisLines.length ? "\n\n" : ""}${quoteSourceNot
           });
 
           await replyWeather(event, result);
+          await rememberRecentHelpItem(
+            "weather",
+            conversationId,
+            last?.resolvedLocation?.displayName || last?.city || "台北"
+          );
           continue;
         }
       }
@@ -9277,6 +9479,15 @@ ${analysisLines.join("\n")}${analysisLines.length ? "\n\n" : ""}${quoteSourceNot
         });
 
         await replyWeather(event, result);
+        await rememberRecentHelpItem(
+          "weather",
+          conversationId,
+          directWeatherRequest.resolvedLocation?.displayName ||
+            directWeatherRequest.locationText ||
+            last?.resolvedLocation?.displayName ||
+            last?.city ||
+            cityClean
+        );
         continue;
       }
 
@@ -9307,6 +9518,11 @@ ${analysisLines.join("\n")}${analysisLines.length ? "\n\n" : ""}${quoteSourceNot
         });
 
         await replyWeather(event, result);
+        await rememberRecentHelpItem(
+          "weather",
+          conversationId,
+          quick.city || last?.resolvedLocation?.displayName || last?.city || cityClean
+        );
         continue;
       }
 
@@ -9348,6 +9564,11 @@ ${analysisLines.join("\n")}${analysisLines.length ? "\n\n" : ""}${quoteSourceNot
         });
 
         await replyWeather(event, result);
+        await rememberRecentHelpItem(
+          "weather",
+          conversationId,
+          cityClean || "台北"
+        );
         continue;
       }
 
