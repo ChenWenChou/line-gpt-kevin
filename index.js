@@ -1604,6 +1604,17 @@ function buildCalorieHelpMessage() {
   );
 }
 
+function buildCommonFeaturesMessage() {
+  return createQuickReplyMessage("常用功能如下，直接點一個。", [
+    { label: "天氣", text: "天氣幫助" },
+    { label: "股票", text: "股票幫助" },
+    { label: "提醒", text: "提醒清單" },
+    { label: "星座", text: "星座幫助" },
+    { label: "熱量", text: "熱量幫助" },
+    { label: "更多", text: "你可以幫我做什麼" },
+  ]);
+}
+
 function buildBotCapabilityMessage() {
   return {
     type: "text",
@@ -9085,6 +9096,11 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
       if (/^熱量幫助$/.test(parsedMessage || userMessage)) {
         await replyMessageWithFallback(event, buildCalorieHelpMessage());
+        continue;
+      }
+
+      if (/^常用功能$/.test(parsedMessage || userMessage)) {
+        await replyMessageWithFallback(event, buildCommonFeaturesMessage());
         continue;
       }
 
