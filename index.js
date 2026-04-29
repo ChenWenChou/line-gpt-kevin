@@ -1460,10 +1460,41 @@ function formatReminderListItem(reminder, index) {
   return `${index}. ${reminder?.nextDueLabel || "--"}｜${reminder?.text || "未命名提醒"}`;
 }
 
+function isSameReminder(candidate, incoming) {
+  const candidateKind = candidate?.kind || "basic";
+  const incomingKind = incoming?.kind || "basic";
+  if (candidateKind !== incomingKind) return false;
+
+  if (incomingKind === "daily_umbrella") {
+    return (
+      String(candidate?.city || "").trim() === String(incoming?.city || "").trim() &&
+      Number(candidate?.dailyHour ?? -1) === Number(incoming?.dailyHour ?? -1) &&
+      Number(candidate?.dailyMinute ?? -1) === Number(incoming?.dailyMinute ?? -1) &&
+      Number(candidate?.rainThreshold ?? -1) === Number(incoming?.rainThreshold ?? -1)
+    );
+  }
+
+  return (
+    String(candidate?.text || "").trim() === String(incoming?.text || "").trim() &&
+    Number(candidate?.dueAt || 0) === Number(incoming?.dueAt || 0)
+  );
+}
+
 async function scheduleReminder(event, parsedReminder) {
   const target = buildReminderTarget(event);
   if (!target || !parsedReminder?.text || !Number.isFinite(parsedReminder?.dueAt)) {
     return null;
+  }
+
+  const existingReminders = await getRemindersForTarget(target, 50);
+  const duplicate = existingReminders.find((item) =>
+    isSameReminder(item, parsedReminder)
+  );
+  if (duplicate) {
+    return {
+      ...duplicate,
+      duplicate: true,
+    };
   }
 
   const reminderId = `r_${Date.now()}_${Math.random()
@@ -8831,6 +8862,23 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             : event.source.type === "group"
             ? "本群"
             : "這個聊天室";
+        if (scheduled?.duplicate) {
+          const duplicateText =
+            scheduled.kind === "daily_umbrella"
+              ? `這個帶傘提醒已經存在了：每天 ${pad2(
+                  scheduled.dailyHour || 7
+                )}:${pad2(scheduled.dailyMinute || 0)}｜${
+                  scheduled.city || "未指定地點"
+                }｜下次 ${scheduled.nextDueLabel || "--"}`
+              : `這個提醒已經存在了：${scheduled.nextDueLabel || "--"}｜${
+                  scheduled.text || "未命名提醒"
+                }`;
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: duplicateText,
+          });
+          continue;
+        }
         if (scheduled?.kind === "daily_umbrella") {
           await replyMessageWithFallback(event, {
             type: "text",
