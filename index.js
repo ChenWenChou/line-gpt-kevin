@@ -1380,6 +1380,86 @@ async function loadReminderDebugSummary(limit = 20) {
   };
 }
 
+function parseReminderCancelCommand(text = "") {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const matched = raw.match(
+    /^(?:取消|刪除)\s*(?:第)?\s*([0-9]{1,3})\s*(?:個|筆)?\s*提醒?$|^(?:取消提醒|刪除提醒)\s*([0-9]{1,3})$/
+  );
+  if (!matched) return null;
+  const index = Number.parseInt(matched[1] || matched[2], 10);
+  if (!Number.isFinite(index) || index <= 0) return null;
+  return { index };
+}
+
+function isReminderListCommand(text = "") {
+  return /^(提醒清單|提醒列表|我的提醒|本群提醒|查看提醒)$/.test(
+    String(text || "").trim()
+  );
+}
+
+async function getRemindersForTarget(target, limit = 20) {
+  if (!target?.targetId || !target?.targetType) return [];
+
+  const scanLimit =
+    Number.isFinite(limit) && limit > 0 ? Math.min(Math.max(limit * 10, 50), 300) : 200;
+  const queueEntries = await redisZRange(REMINDER_QUEUE_KEY, 0, scanLimit - 1, true);
+  const reminders = [];
+
+  for (let i = 0; i < queueEntries.length; i += 2) {
+    const reminderId = queueEntries[i];
+    const scoreRaw = queueEntries[i + 1];
+    const itemKey = getReminderItemKey(reminderId);
+    const raw = await redisGet(itemKey);
+    if (!raw) continue;
+
+    let payload = null;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+
+    if (payload?.targetId !== target.targetId || payload?.targetType !== target.targetType) {
+      continue;
+    }
+
+    const dueAt = Number(payload?.dueAt || scoreRaw || 0);
+    reminders.push({
+      id: payload?.id || reminderId,
+      kind: payload?.kind || "basic",
+      text: payload?.text || "",
+      city: payload?.city || null,
+      dueAt,
+      nextDueLabel: Number.isFinite(dueAt) ? reminderDateLabel(dueAt) : null,
+      dailyHour: Number.isFinite(payload?.dailyHour) ? payload.dailyHour : null,
+      dailyMinute: Number.isFinite(payload?.dailyMinute) ? payload.dailyMinute : null,
+      rainThreshold: Number.isFinite(payload?.rainThreshold)
+        ? payload.rainThreshold
+        : null,
+      itemKey,
+    });
+  }
+
+  reminders.sort((a, b) => {
+    const aDue = Number.isFinite(a.dueAt) ? a.dueAt : Number.MAX_SAFE_INTEGER;
+    const bDue = Number.isFinite(b.dueAt) ? b.dueAt : Number.MAX_SAFE_INTEGER;
+    return aDue - bDue;
+  });
+
+  return reminders.slice(0, limit);
+}
+
+function formatReminderListItem(reminder, index) {
+  if (reminder?.kind === "daily_umbrella") {
+    const hh = pad2(reminder?.dailyHour ?? 7);
+    const mm = pad2(reminder?.dailyMinute ?? 0);
+    return `${index}. 每天 ${hh}:${mm} 帶傘提醒｜${reminder?.city || "未指定地點"}｜下次 ${reminder?.nextDueLabel || "--"}`;
+  }
+
+  return `${index}. ${reminder?.nextDueLabel || "--"}｜${reminder?.text || "未命名提醒"}`;
+}
+
 async function scheduleReminder(event, parsedReminder) {
   const target = buildReminderTarget(event);
   if (!target || !parsedReminder?.text || !Number.isFinite(parsedReminder?.dueAt)) {
@@ -8674,6 +8754,52 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       const lastWeatherContext = userId
         ? await getLastWeatherContext(userId)
         : null;
+      const reminderTarget = buildReminderTarget(event);
+
+      if (isReminderListCommand(parsedMessage || userMessage)) {
+        const reminders = await getRemindersForTarget(reminderTarget, 10);
+        if (!reminders.length) {
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: "目前這個聊天室沒有已建立的提醒。",
+          });
+          continue;
+        }
+
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: `目前提醒清單：\n${reminders
+            .map((item, idx) => formatReminderListItem(item, idx + 1))
+            .join("\n")}\n\n要取消可直接說「取消提醒 1」。`,
+        });
+        continue;
+      }
+
+      const cancelReminder = parseReminderCancelCommand(parsedMessage || userMessage);
+      if (cancelReminder) {
+        const reminders = await getRemindersForTarget(reminderTarget, 20);
+        const targetReminder = reminders[cancelReminder.index - 1];
+        if (!targetReminder) {
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: `找不到第 ${cancelReminder.index} 筆提醒。先輸入「提醒清單」看目前編號。`,
+          });
+          continue;
+        }
+
+        await redisZRem(REMINDER_QUEUE_KEY, targetReminder.id);
+        await redisDel(targetReminder.itemKey);
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text:
+            targetReminder.kind === "daily_umbrella"
+              ? `已取消每天 ${pad2(targetReminder.dailyHour || 7)}:${pad2(
+                  targetReminder.dailyMinute || 0
+                )} 的帶傘提醒（${targetReminder.city || "未指定地點"}）。`
+              : `已取消提醒：${targetReminder.text || "未命名提醒"}`,
+        });
+        continue;
+      }
 
       const parsedReminder = parseReminderCommand(parsedMessage || userMessage, {
         contextResolvedLocation: lastWeatherContext?.resolvedLocation,
