@@ -132,6 +132,19 @@ async function redisZRangeByScore(key, min, max, limit = 20) {
   }
 }
 
+async function redisZRange(key, start = 0, end = -1, withScores = false) {
+  if (!(await ensureRedisReady())) return [];
+  try {
+    const result = withScores
+      ? await redisClient.zrange(key, start, end, "WITHSCORES")
+      : await redisClient.zrange(key, start, end);
+    return Array.isArray(result) ? result : [];
+  } catch (err) {
+    markRedisUnavailable(err, `ZRANGE failed (${key})`);
+    return [];
+  }
+}
+
 async function redisZRem(key, member) {
   if (!(await ensureRedisReady())) return 0;
   try {
@@ -1304,6 +1317,66 @@ async function loadHoroscopeCacheDebugSummary() {
     cacheCount: snapshots.length,
     bySource,
     sample: snapshots.slice(0, 6),
+  };
+}
+
+async function loadReminderDebugSummary(limit = 20) {
+  const safeLimit =
+    Number.isFinite(limit) && limit > 0 ? Math.min(limit, 100) : 20;
+  const queueEntries = await redisZRange(
+    REMINDER_QUEUE_KEY,
+    0,
+    Math.max(0, safeLimit - 1),
+    true
+  );
+  const reminders = [];
+
+  for (let i = 0; i < queueEntries.length; i += 2) {
+    const reminderId = queueEntries[i];
+    const scoreRaw = queueEntries[i + 1];
+    const itemKey = getReminderItemKey(reminderId);
+    const raw = await redisGet(itemKey);
+    if (!raw) continue;
+
+    let payload = null;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+
+    const dueAt = Number(payload?.dueAt || scoreRaw || 0);
+    reminders.push({
+      id: payload?.id || reminderId,
+      kind: payload?.kind || "basic",
+      text: payload?.text || null,
+      city: payload?.city || null,
+      targetType: payload?.targetType || null,
+      targetIdMasked: maskIdentifier(payload?.targetId || ""),
+      dailyHour: Number.isFinite(payload?.dailyHour) ? payload.dailyHour : null,
+      dailyMinute: Number.isFinite(payload?.dailyMinute) ? payload.dailyMinute : null,
+      rainThreshold: Number.isFinite(payload?.rainThreshold)
+        ? payload.rainThreshold
+        : null,
+      retries: Number(payload?.retries || 0),
+      createdAt: Number.isFinite(payload?.createdAt)
+        ? new Date(payload.createdAt).toISOString()
+        : null,
+      nextDueAt: Number.isFinite(dueAt) ? new Date(dueAt).toISOString() : null,
+      nextDueLabel: Number.isFinite(dueAt) ? reminderDateLabel(dueAt) : null,
+    });
+  }
+
+  const byKind = reminders.reduce((acc, item) => {
+    const key = item.kind || "unknown";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+
+  return {
+    count: reminders.length,
+    byKind,
+    reminders,
   };
 }
 
@@ -9981,6 +10054,20 @@ app.get("/api/debug/line-push-targets", async (req, res) => {
       targetType: target.targetType,
       targetIdMasked: maskIdentifier(target.targetId),
     })),
+  });
+});
+
+app.get("/api/debug/reminders", async (req, res) => {
+  if (!isCronAuthorized(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  const summary = await loadReminderDebugSummary(
+    Number.parseInt(String(req.query.limit || "20"), 10)
+  );
+  return res.json({
+    ok: true,
+    ...summary,
   });
 });
 
