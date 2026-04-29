@@ -893,6 +893,26 @@ function reminderDateLabel(dueAtMs, nowMs = Date.now()) {
   return `${due.month}/${due.day} ${dueTime}`;
 }
 
+function addTaipeiDays(ms, days, hour = 0, minute = 0) {
+  const base = taipeiPartsFromUtcMs(ms);
+  const baseMidnight = utcMsFromTaipeiParts({
+    year: base.year,
+    month: base.month,
+    day: base.day,
+    hour: 0,
+    minute: 0,
+  });
+  const shiftedMidnight = baseMidnight + days * 24 * 60 * 60 * 1000;
+  const shifted = taipeiPartsFromUtcMs(shiftedMidnight);
+  return utcMsFromTaipeiParts({
+    year: shifted.year,
+    month: shifted.month,
+    day: shifted.day,
+    hour,
+    minute,
+  });
+}
+
 function parseChineseNumberToken(token) {
   const t = String(token || "")
     .trim()
@@ -946,40 +966,7 @@ function cleanReminderText(text) {
   return raw.length > max ? `${raw.slice(0, max - 3)}...` : raw;
 }
 
-function parseReminderCommand(rawText, nowMs = Date.now()) {
-  const text = String(rawText || "").trim();
-  if (!text.includes("提醒")) return null;
-
-  const relMinute = text.match(
-    /([0-9零〇一二兩三四五六七八九十]{1,3})\s*(分鐘|分钟|分鍾)\s*後提醒(?:我)?(.+)/
-  );
-  if (relMinute) {
-    const n = parseNumberToken(relMinute[1]);
-    const content = cleanReminderText(relMinute[3]);
-    if (!Number.isFinite(n) || n <= 0 || !content) return null;
-    return {
-      dueAt: nowMs + n * 60 * 1000,
-      text: content,
-    };
-  }
-
-  const relHour = text.match(
-    /([0-9零〇一二兩三四五六七八九十]{1,2})\s*(小時|小时)\s*後提醒(?:我)?(.+)/
-  );
-  if (relHour) {
-    const n = parseNumberToken(relHour[1]);
-    const content = cleanReminderText(relHour[3]);
-    if (!Number.isFinite(n) || n <= 0 || !content) return null;
-    return {
-      dueAt: nowMs + n * 60 * 60 * 1000,
-      text: content,
-    };
-  }
-
-  const contentMatch = text.match(/提醒(?:我)?(.+)$/);
-  const reminderText = cleanReminderText(contentMatch?.[1] || "");
-  if (!reminderText) return null;
-
+function parseReminderClock(text, nowMs = Date.now()) {
   let hour = null;
   let minute = 0;
 
@@ -1054,6 +1041,111 @@ function parseReminderCommand(rawText, nowMs = Date.now()) {
 
   return {
     dueAt,
+    hour,
+    minute,
+  };
+}
+
+function parseDailyUmbrellaReminder(rawText, options = {}) {
+  const text = String(rawText || "").trim();
+  if (!/(每天|每日)/.test(text)) return null;
+  if (!/提醒/.test(text)) return null;
+  if (!/(下雨|降雨|帶傘|雨傘|折傘|傘)/.test(text)) return null;
+
+  const nowMs = Number.isFinite(options?.nowMs) ? options.nowMs : Date.now();
+  const schedule = parseReminderClock(text, nowMs);
+  if (!schedule) return null;
+
+  const contextResolvedLocation = options?.contextResolvedLocation || null;
+  const weatherRequest = parseWeatherRequest(text, {
+    contextResolvedLocation,
+  });
+  const fallbackResolvedLocation = contextResolvedLocation || null;
+  const fallbackCity = String(options?.fallbackCity || "").trim();
+  const fallbackLat = Number.isFinite(options?.fallbackLat)
+    ? options.fallbackLat
+    : null;
+  const fallbackLon = Number.isFinite(options?.fallbackLon)
+    ? options.fallbackLon
+    : null;
+  const resolvedLocation =
+    weatherRequest?.resolvedLocation || fallbackResolvedLocation || null;
+  const city =
+    resolvedLocation?.displayName ||
+    weatherRequest?.locationText ||
+    fallbackCity ||
+    "";
+
+  if (!city) {
+    return {
+      error: "missing_weather_location",
+      kind: "daily_umbrella",
+    };
+  }
+
+  return {
+    kind: "daily_umbrella",
+    dueAt: schedule.dueAt,
+    text: "今天有可能下雨記得帶傘",
+    city,
+    lat: fallbackLat,
+    lon: fallbackLon,
+    resolvedLocation,
+    dailyHour: schedule.hour,
+    dailyMinute: schedule.minute,
+    rainThreshold: 30,
+  };
+}
+
+function parseReminderCommand(rawText, options = {}) {
+  const nowMs = Number.isFinite(options?.nowMs) ? options.nowMs : Date.now();
+  const text = String(rawText || "").trim();
+  if (!text.includes("提醒")) return null;
+
+  const dailyUmbrella = parseDailyUmbrellaReminder(text, {
+    nowMs,
+    contextResolvedLocation: options?.contextResolvedLocation,
+    fallbackCity: options?.fallbackCity,
+    fallbackLat: options?.fallbackLat,
+    fallbackLon: options?.fallbackLon,
+  });
+  if (dailyUmbrella) return dailyUmbrella;
+
+  const relMinute = text.match(
+    /([0-9零〇一二兩三四五六七八九十]{1,3})\s*(分鐘|分钟|分鍾)\s*後提醒(?:我)?(.+)/
+  );
+  if (relMinute) {
+    const n = parseNumberToken(relMinute[1]);
+    const content = cleanReminderText(relMinute[3]);
+    if (!Number.isFinite(n) || n <= 0 || !content) return null;
+    return {
+      dueAt: nowMs + n * 60 * 1000,
+      text: content,
+    };
+  }
+
+  const relHour = text.match(
+    /([0-9零〇一二兩三四五六七八九十]{1,2})\s*(小時|小时)\s*後提醒(?:我)?(.+)/
+  );
+  if (relHour) {
+    const n = parseNumberToken(relHour[1]);
+    const content = cleanReminderText(relHour[3]);
+    if (!Number.isFinite(n) || n <= 0 || !content) return null;
+    return {
+      dueAt: nowMs + n * 60 * 60 * 1000,
+      text: content,
+    };
+  }
+
+  const contentMatch = text.match(/提醒(?:我)?(.+)$/);
+  const reminderText = cleanReminderText(contentMatch?.[1] || "");
+  if (!reminderText) return null;
+
+  const schedule = parseReminderClock(text, nowMs);
+  if (!schedule) return null;
+
+  return {
+    dueAt: schedule.dueAt,
     text: reminderText,
   };
 }
@@ -1234,6 +1326,20 @@ async function scheduleReminder(event, parsedReminder) {
     creatorId: event?.source?.userId || null,
     retries: 0,
     createdAt: Date.now(),
+    kind: parsedReminder?.kind || "basic",
+    city: parsedReminder?.city || null,
+    lat: Number.isFinite(parsedReminder?.lat) ? parsedReminder.lat : null,
+    lon: Number.isFinite(parsedReminder?.lon) ? parsedReminder.lon : null,
+    resolvedLocation: parsedReminder?.resolvedLocation || null,
+    dailyHour: Number.isFinite(parsedReminder?.dailyHour)
+      ? parsedReminder.dailyHour
+      : null,
+    dailyMinute: Number.isFinite(parsedReminder?.dailyMinute)
+      ? parsedReminder.dailyMinute
+      : null,
+    rainThreshold: Number.isFinite(parsedReminder?.rainThreshold)
+      ? parsedReminder.rainThreshold
+      : null,
   };
 
   const itemKey = getReminderItemKey(reminderId);
@@ -1256,6 +1362,100 @@ async function scheduleReminder(event, parsedReminder) {
   return payload;
 }
 
+async function rescheduleRecurringReminder(itemKey, payload, nextDueAt) {
+  const nextPayload = {
+    ...payload,
+    dueAt: nextDueAt,
+    retries: 0,
+    lastProcessedAt: Date.now(),
+  };
+  await redisSet(
+    itemKey,
+    JSON.stringify(nextPayload),
+    "EX",
+    Number.isFinite(REMINDER_TTL_SECONDS) && REMINDER_TTL_SECONDS > 0
+      ? REMINDER_TTL_SECONDS
+      : 60 * 60 * 24 * 7
+  );
+  await redisZAdd(REMINDER_QUEUE_KEY, nextDueAt, payload.id);
+}
+
+async function processDailyUmbrellaReminder(payload, itemKey) {
+  const hour = Number.isFinite(payload?.dailyHour) ? payload.dailyHour : 7;
+  const minute = Number.isFinite(payload?.dailyMinute) ? payload.dailyMinute : 0;
+  const nextDueAt = addTaipeiDays(payload?.dueAt || Date.now(), 1, hour, minute);
+
+  try {
+    const result = await getWeatherAndOutfit({
+      city: payload?.city || "",
+      when: "today",
+      timeIntent: "today",
+      queryType: "umbrella",
+      rawText: `${payload?.city || ""} 今天要帶傘嗎`,
+      resolvedLocation: payload?.resolvedLocation || null,
+      lat: Number.isFinite(payload?.lat) ? payload.lat : undefined,
+      lon: Number.isFinite(payload?.lon) ? payload.lon : undefined,
+    });
+
+    if (!result || typeof result === "string" || !result?.data) {
+      throw new Error("weather lookup unavailable");
+    }
+
+    const rainPercent = Number.isFinite(result?.data?.rainPercent)
+      ? result.data.rainPercent
+      : 0;
+    const threshold = Number.isFinite(payload?.rainThreshold)
+      ? payload.rainThreshold
+      : 30;
+    const locationLabel = String(result?.data?.city || payload?.city || "今天").trim();
+
+    if (rainPercent >= threshold) {
+      const weatherText = String(result?.data?.desc || "").trim();
+      const detail = weatherText ? `（${weatherText}）` : "";
+      await client.pushMessage(
+        payload.targetId,
+        normalizeLineMessage({
+          type: "text",
+          text: `☔ ${locationLabel} 今天降雨機率約 ${rainPercent}%${detail}，記得帶傘。`,
+        })
+      );
+    }
+
+    await rescheduleRecurringReminder(itemKey, payload, nextDueAt);
+    return { sent: rainPercent >= threshold ? 1 : 0, skipped: rainPercent < threshold ? 1 : 0 };
+  } catch (err) {
+    const retries = Number(payload?.retries || 0) + 1;
+    if (retries <= REMINDER_MAX_RETRIES) {
+      const retryDueAt =
+        Date.now() +
+        (Number.isFinite(REMINDER_RETRY_DELAY_SECONDS) &&
+        REMINDER_RETRY_DELAY_SECONDS > 0
+          ? REMINDER_RETRY_DELAY_SECONDS
+          : 60) *
+          1000;
+      const retryPayload = {
+        ...payload,
+        retries,
+        dueAt: retryDueAt,
+      };
+      await redisSet(
+        itemKey,
+        JSON.stringify(retryPayload),
+        "EX",
+        Number.isFinite(REMINDER_TTL_SECONDS) && REMINDER_TTL_SECONDS > 0
+          ? REMINDER_TTL_SECONDS
+          : 60 * 60 * 24 * 7
+      );
+      await redisZAdd(REMINDER_QUEUE_KEY, retryDueAt, payload.id);
+      return { retried: 1 };
+    }
+
+    await rescheduleRecurringReminder(itemKey, payload, nextDueAt);
+    console.error("daily umbrella reminder failed:", err?.message || err);
+    return { failed: 1 };
+  }
+}
+
 async function processDueReminders() {
   const now = Date.now();
   const dueIds = await redisZRangeByScore(
@@ -1271,6 +1471,7 @@ async function processDueReminders() {
   let sent = 0;
   let retried = 0;
   let failed = 0;
+  let skipped = 0;
 
   for (const reminderId of dueIds) {
     const claimed = await redisZRem(REMINDER_QUEUE_KEY, reminderId);
@@ -1295,6 +1496,15 @@ async function processDueReminders() {
     if (!text || !targetId) {
       await redisDel(itemKey);
       failed++;
+      continue;
+    }
+
+    if (payload?.kind === "daily_umbrella") {
+      const outcome = await processDailyUmbrellaReminder(payload, itemKey);
+      sent += Number(outcome?.sent || 0);
+      retried += Number(outcome?.retried || 0);
+      failed += Number(outcome?.failed || 0);
+      skipped += Number(outcome?.skipped || 0);
       continue;
     }
 
@@ -1343,6 +1553,7 @@ async function processDueReminders() {
     sent,
     retried,
     failed,
+    skipped,
   };
 }
 
@@ -8387,9 +8598,25 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       const parsedMessage = stripBotName(rawMessage); // 邏輯用 / GPT 用
       const userId = event.source.userId;
       const conversationId = getConversationId(event);
+      const lastWeatherContext = userId
+        ? await getLastWeatherContext(userId)
+        : null;
 
-      const parsedReminder = parseReminderCommand(parsedMessage || userMessage);
+      const parsedReminder = parseReminderCommand(parsedMessage || userMessage, {
+        contextResolvedLocation: lastWeatherContext?.resolvedLocation,
+        fallbackCity: lastWeatherContext?.city,
+        fallbackLat: lastWeatherContext?.lat,
+        fallbackLon: lastWeatherContext?.lon,
+      });
       if (parsedReminder) {
+        if (parsedReminder?.error === "missing_weather_location") {
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: "這種帶傘提醒需要先知道地點。你可以直接說「每天早上七點提醒我桃園今天可能下雨要帶傘」，或先查過一次當地天氣。",
+          });
+          continue;
+        }
+
         const scheduled = await scheduleReminder(event, parsedReminder);
         if (!scheduled) {
           await replyMessageWithFallback(event, {
@@ -8405,6 +8632,18 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             : event.source.type === "group"
             ? "本群"
             : "這個聊天室";
+        if (scheduled?.kind === "daily_umbrella") {
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: `好，我會每天 ${pad2(
+              scheduled.dailyHour || 7
+            )}:${pad2(scheduled.dailyMinute || 0)} 先看 ${
+              scheduled.city
+            } 的天氣；如果今天有下雨機會，就提醒${targetLabel}帶傘。`,
+          });
+          continue;
+        }
+
         await replyMessageWithFallback(event, {
           type: "text",
           text: `好，我會在 ${reminderDateLabel(
@@ -8753,7 +8992,7 @@ ${analysisLines.join("\n")}${analysisLines.length ? "\n\n" : ""}${quoteSourceNot
       // ─────────────────────────────────────
       // 3️⃣ v2 weather parser（穿搭 / 帶傘 / 時段）
       // ─────────────────────────────────────
-      const last = await getLastWeatherContext(userId);
+      const last = lastWeatherContext;
       const directWeatherRequest = parseWeatherRequest(parsedMessage, {
         contextResolvedLocation: last?.resolvedLocation,
       });
