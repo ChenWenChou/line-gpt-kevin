@@ -1462,10 +1462,11 @@ async function buildWatchlistNewsDigestText(
     minute: "2-digit",
     hour12: false,
   }).format(new Date());
+  const officialAnnouncementItems = await fetchOfficialAnnouncementItems();
   const lines = [
     options.mode === "push" ? "📌 自選股新聞晨報" : "📌 自選股新聞摘要",
     `資料時間：${dateLabel}`,
-    "說明：第一版先整理自選股重點狀態與官方市場提示，公告新聞擷取下一批補齊。",
+    "說明：先顯示近期待抓到的官方公告；若沒有明確公告，再退回市場狀態摘要。",
   ];
 
   for (let index = 0; index < targets.length; index += 1) {
@@ -1493,14 +1494,30 @@ async function buildWatchlistNewsDigestText(
         ? "注意股"
         : "目前未命中注意 / 處置股";
       const summaryText = insight?.comment || "尚未整理出進一步判讀。";
+      const officialItems = findRelevantOfficialAnnouncementsForStock(
+        stock,
+        officialAnnouncementItems
+      ).slice(0, 2);
 
-      lines.push(
+      const block = [
         `\n${index + 1}. ${item.name}（${item.code}）`,
         `- 行情：${priceText}｜漲跌：${percent}`,
-        `- 官方市場提示：${alertText}`,
-        `- 判讀：${status}`,
-        `- 摘要：${summaryText}`
-      );
+      ];
+
+      if (officialItems.length) {
+        officialItems.forEach((announcement, announcementIndex) => {
+          block.push(
+            `- 官方公告${
+              officialItems.length > 1 ? ` ${announcementIndex + 1}` : ""
+            }：${announcement.dateText}｜${announcement.subject}`
+          );
+        });
+      } else {
+        block.push(`- 官方市場提示：${alertText}`);
+      }
+
+      block.push(`- 判讀：${status}`, `- 摘要：${summaryText}`);
+      lines.push(...block);
     } catch (err) {
       console.error("buildWatchlistNewsDigestText failed:", item?.code, err);
       lines.push(
@@ -5312,6 +5329,9 @@ const TPEX_ATTENTION_QUERY_URL =
   "https://www.tpex.org.tw/web/bulletin/attention_information/trading_attention_information.php";
 const TPEX_DISPOSITION_QUERY_URL =
   "https://www.tpex.org.tw/web/bulletin/disposal_information/disposal_information.php";
+const TWSE_OFFICIAL_ANNOUNCEMENT_URL = "https://www.twse.com.tw/IIH2/en/announce/";
+const TPEX_OFFICIAL_ANNOUNCEMENT_URL =
+  "https://wwwov.tpex.org.tw/web/bulletin/announcement/announcement_result.php?l=zh-tw";
 const MIN_TWSE_STOCK_COUNT = 500;
 const MIN_TPEX_STOCK_COUNT = 300;
 const STOCK_QUOTE_TIMEOUT_MS = Number(process.env.STOCK_QUOTE_TIMEOUT_MS || 6000);
@@ -5338,6 +5358,9 @@ const STOCK_WATCHLIST_NEWS_PUSH_HOUR = Number(
 );
 const STOCK_WATCHLIST_NEWS_PUSH_MINUTE = Number(
   process.env.STOCK_WATCHLIST_NEWS_PUSH_MINUTE || 30
+);
+const STOCK_WATCHLIST_NEWS_ANNOUNCEMENT_CACHE_TTL_SECONDS = Number(
+  process.env.STOCK_WATCHLIST_NEWS_ANNOUNCEMENT_CACHE_TTL_SECONDS || 15 * 60
 );
 const STOCK_INTRADAY_TTL_SECONDS = Number(
   process.env.STOCK_INTRADAY_TTL_SECONDS || 60 * 60 * 36
@@ -6022,6 +6045,169 @@ function parseHtmlTableRows(text) {
       stripHtmlToText(cellMatch[1])
     )
   );
+}
+
+function parseFlexibleDateToTimestamp(dateText) {
+  const text = String(dateText || "").trim();
+  if (!text) return null;
+
+  let match = text.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (year >= 1900 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return Date.UTC(year, month - 1, day);
+    }
+  }
+
+  match = text.match(/(\d{2,3})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+  if (match) {
+    const rocYear = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (rocYear > 0 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return Date.UTC(rocYear + 1911, month - 1, day);
+    }
+  }
+
+  return null;
+}
+
+function parseOfficialAnnouncementRows(text, source) {
+  const rows = parseHtmlTableRows(text);
+  const items = [];
+  let dateIndex = -1;
+  let refIndex = -1;
+  let subjectIndex = -1;
+
+  for (const cells of rows) {
+    if (!cells.length) continue;
+
+    if (
+      cells.some((cell) => /Issuing Date|資料日期|發文日期/i.test(cell)) &&
+      cells.some((cell) => /Subject|主旨/i.test(cell))
+    ) {
+      dateIndex = cells.findIndex((cell) =>
+        /Issuing Date|資料日期|發文日期/i.test(cell)
+      );
+      refIndex = cells.findIndex((cell) =>
+        /Reference No\.|發文字號|文號/i.test(cell)
+      );
+      subjectIndex = cells.findIndex((cell) => /Subject|主旨/i.test(cell));
+      continue;
+    }
+
+    if (dateIndex < 0 || subjectIndex < 0) continue;
+    if (cells.length <= Math.max(dateIndex, subjectIndex, Math.max(refIndex, 0))) {
+      continue;
+    }
+
+    const dateText = String(cells[dateIndex] || "").trim();
+    const subject = String(cells[subjectIndex] || "").trim();
+    const refNo =
+      refIndex >= 0 && cells[refIndex] ? String(cells[refIndex] || "").trim() : null;
+    if (!dateText || !subject) continue;
+
+    items.push({
+      source,
+      dateText,
+      timestamp: parseFlexibleDateToTimestamp(dateText),
+      refNo,
+      subject,
+    });
+  }
+
+  return items;
+}
+
+function getOfficialAnnouncementCacheKey(source) {
+  return `stock:watchlist:news:official:${source}`;
+}
+
+async function fetchOfficialAnnouncementItemsBySource(source) {
+  const cacheKey = getOfficialAnnouncementCacheKey(source);
+  try {
+    const cached = await redisGet(cacheKey);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (err) {
+    console.error("official announcement cache parse error:", source, err);
+  }
+
+  let url = "";
+  if (source === "twse") url = TWSE_OFFICIAL_ANNOUNCEMENT_URL;
+  if (source === "tpex") url = TPEX_OFFICIAL_ANNOUNCEMENT_URL;
+  if (!url) return [];
+
+  try {
+    const { res, text } = await fetchTextResponse(url, {
+      headers: {
+        "user-agent": "Mozilla/5.0",
+        accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`${source} official announcements unavailable: ${res.status}`);
+    }
+
+    const items = parseOfficialAnnouncementRows(text, source)
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+      .slice(0, 80);
+    await redisSet(
+      cacheKey,
+      JSON.stringify(items),
+      "EX",
+      Number.isFinite(STOCK_WATCHLIST_NEWS_ANNOUNCEMENT_CACHE_TTL_SECONDS) &&
+        STOCK_WATCHLIST_NEWS_ANNOUNCEMENT_CACHE_TTL_SECONDS > 0
+        ? STOCK_WATCHLIST_NEWS_ANNOUNCEMENT_CACHE_TTL_SECONDS
+        : 15 * 60
+    );
+    return items;
+  } catch (err) {
+    console.error("fetchOfficialAnnouncementItemsBySource failed:", source, err);
+    return [];
+  }
+}
+
+async function fetchOfficialAnnouncementItems() {
+  const [twseItems, tpexItems] = await Promise.all([
+    fetchOfficialAnnouncementItemsBySource("twse"),
+    fetchOfficialAnnouncementItemsBySource("tpex"),
+  ]);
+  return [...twseItems, ...tpexItems].sort(
+    (a, b) => (b.timestamp || 0) - (a.timestamp || 0)
+  );
+}
+
+function extractCodeTokensFromText(text) {
+  const raw = String(text || "").toUpperCase();
+  const matched = raw.match(/(?:^|[^0-9A-Z])(\d{4,5}[A-Z]?)(?=$|[^0-9A-Z])/g) || [];
+  return [...new Set(matched.map((token) => normalizeStockCode(token)))].filter(Boolean);
+}
+
+function findRelevantOfficialAnnouncementsForStock(stock, items = []) {
+  const code = normalizeStockCode(stock?.code);
+  const normalizedName = normalizeStockText(stock?.name || "");
+  const normalizedAliases = (Array.isArray(stock?.aliases) ? stock.aliases : [])
+    .map((alias) => normalizeStockText(alias))
+    .filter(Boolean);
+  const market = String(stock?.market || "").toUpperCase();
+
+  return items.filter((item) => {
+    if (!item?.subject) return false;
+    if (market === "TWSE" && item.source === "tpex") return false;
+    if (market === "TPEX" && item.source === "twse") return false;
+
+    const codeTokens = extractCodeTokensFromText(item.subject);
+    if (code && codeTokens.includes(code)) return true;
+
+    const normalizedSubject = normalizeStockText(item.subject);
+    if (normalizedName && normalizedSubject.includes(normalizedName)) return true;
+    return normalizedAliases.some((alias) => normalizedSubject.includes(alias));
+  });
 }
 
 function parseTwseAttentionHtml(text) {
