@@ -782,6 +782,11 @@ function getChatHistoryKey(conversationId) {
   return `chat:history:${conversationId}`;
 }
 
+function getStockWatchlistKey(conversationId) {
+  if (!conversationId) return null;
+  return `stock:watchlist:v1:${conversationId}`;
+}
+
 function sanitizeChatContent(text) {
   const t = String(text || "").trim();
   if (!t) return "";
@@ -906,6 +911,277 @@ async function appendRecentChatHistory(conversationId, userText, assistantText) 
 
 function getReminderItemKey(reminderId) {
   return `${REMINDER_ITEM_PREFIX}${reminderId}`;
+}
+
+function normalizeWatchlistItem(item, fallback = {}) {
+  const code = normalizeStockCode(item?.code || fallback?.code);
+  if (!code) return null;
+  return {
+    code,
+    name: String(item?.name || fallback?.name || code).trim() || code,
+    symbol:
+      String(item?.symbol || fallback?.symbol || `${code}.TW`).trim() ||
+      `${code}.TW`,
+    market: String(item?.market || fallback?.market || "TWSE").trim() || "TWSE",
+    targetType: item?.targetType || fallback?.targetType || null,
+    targetId: item?.targetId || fallback?.targetId || null,
+    conversationId: item?.conversationId || fallback?.conversationId || null,
+    createdAt:
+      Number.isFinite(item?.createdAt) && item.createdAt > 0
+        ? Number(item.createdAt)
+        : Number.isFinite(fallback?.createdAt) && fallback.createdAt > 0
+        ? Number(fallback.createdAt)
+        : Date.now(),
+  };
+}
+
+async function getStockWatchlist(conversationId) {
+  const key = getStockWatchlistKey(conversationId);
+  if (!key) return [];
+
+  try {
+    const raw = await redisGet(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => normalizeWatchlistItem(item, { conversationId }))
+      .filter(Boolean)
+      .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+  } catch (err) {
+    console.error("getStockWatchlist parse error:", err);
+    return [];
+  }
+}
+
+async function saveStockWatchlist(conversationId, items) {
+  const key = getStockWatchlistKey(conversationId);
+  if (!key) return false;
+
+  const sanitized = Array.isArray(items)
+    ? items
+        .map((item) => normalizeWatchlistItem(item, { conversationId }))
+        .filter(Boolean)
+    : [];
+
+  return redisSet(key, JSON.stringify(sanitized));
+}
+
+function isWatchlistListCommand(text = "") {
+  return /^(自選股|我的自選|自選清單)$/.test(String(text || "").trim());
+}
+
+function isWatchlistSummaryCommand(text = "") {
+  return /^(自選股摘要|我的自選摘要)$/.test(String(text || "").trim());
+}
+
+function parseWatchlistAddCommand(text = "") {
+  const raw = String(text || "").trim();
+  const matched = raw.match(/^(?:加入自選|自選|追蹤)\s+(.+)$/);
+  if (!matched) return null;
+  const query = String(matched[1] || "").trim();
+  if (!query) return null;
+  return { query };
+}
+
+function parseWatchlistRemoveCommand(text = "") {
+  const raw = String(text || "").trim();
+  const matched = raw.match(/^(?:移除自選|刪除自選|取消追蹤)\s+(.+)$/);
+  if (!matched) return null;
+  const target = String(matched[1] || "").trim();
+  if (!target) return null;
+
+  if (/^[0-9]{1,3}$/.test(target)) {
+    const index = Number.parseInt(target, 10);
+    if (Number.isFinite(index) && index > 0) {
+      return { mode: "index", index };
+    }
+  }
+
+  return { mode: "query", query: target };
+}
+
+function formatWatchlistMarketLabel(item) {
+  return item?.market === "TPEX" || String(item?.symbol || "").endsWith(".TWO")
+    ? "上櫃"
+    : "上市";
+}
+
+function formatWatchlistListText(items = []) {
+  if (!items.length) {
+    return "目前這個聊天室還沒有自選股。可以直接說「加入自選 2330」。";
+  }
+
+  const body = items
+    .map(
+      (item, index) =>
+        `${index + 1}. ${item.name}（${item.code}｜${formatWatchlistMarketLabel(item)}）`
+    )
+    .join("\n");
+  return `目前自選股：\n${body}\n\n可直接說：\n- 自選股摘要\n- 移除自選 2`;
+}
+
+async function addStockToWatchlist(conversationId, target, stock) {
+  const watchlist = await getStockWatchlist(conversationId);
+  const code = normalizeStockCode(stock?.code);
+  if (!code) {
+    return { ok: false, reason: "invalid-stock" };
+  }
+
+  const existing = watchlist.find((item) => item.code === code);
+  if (existing) {
+    return { ok: true, duplicate: true, item: existing, items: watchlist };
+  }
+
+  const maxItems =
+    Number.isFinite(STOCK_WATCHLIST_MAX_ITEMS) && STOCK_WATCHLIST_MAX_ITEMS > 0
+      ? STOCK_WATCHLIST_MAX_ITEMS
+      : 20;
+  if (watchlist.length >= maxItems) {
+    return { ok: false, reason: "limit-exceeded", limit: maxItems };
+  }
+
+  const item = normalizeWatchlistItem({
+    code,
+    name: stock?.name || code,
+    symbol: stock?.symbol || `${code}.TW`,
+    market: stock?.market || "TWSE",
+    targetType: target?.targetType || null,
+    targetId: target?.targetId || null,
+    conversationId,
+    createdAt: Date.now(),
+  });
+  if (!item) return { ok: false, reason: "invalid-stock" };
+
+  const nextItems = [...watchlist, item];
+  const saved = await saveStockWatchlist(conversationId, nextItems);
+  if (!saved) return { ok: false, reason: "save-failed" };
+
+  await rememberIntradayWatchStock(stock);
+  return { ok: true, duplicate: false, item, items: nextItems };
+}
+
+async function removeStockFromWatchlist(conversationId, removal) {
+  const watchlist = await getStockWatchlist(conversationId);
+  if (!watchlist.length) return { ok: false, reason: "empty" };
+
+  let targetIndex = -1;
+  if (removal?.mode === "index") {
+    targetIndex = removal.index - 1;
+  } else if (removal?.mode === "query") {
+    const query = String(removal.query || "").trim();
+    const normalizedCode = normalizeStockCode(query);
+    targetIndex = watchlist.findIndex((item) => item.code === normalizedCode);
+    if (targetIndex < 0) {
+      const normalizedQuery = normalizeStockText(query);
+      targetIndex = watchlist.findIndex(
+        (item) => normalizeStockText(item.name) === normalizedQuery
+      );
+    }
+  }
+
+  if (targetIndex < 0 || targetIndex >= watchlist.length) {
+    return { ok: false, reason: "not-found", items: watchlist };
+  }
+
+  const [removed] = watchlist.splice(targetIndex, 1);
+  const saved = await saveStockWatchlist(conversationId, watchlist);
+  if (!saved) return { ok: false, reason: "save-failed", items: watchlist };
+  return { ok: true, item: removed, items: watchlist };
+}
+
+async function getStocksMapFromCache() {
+  const raw = await redisGet(STOCKS_REDIS_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (err) {
+    console.error("getStocksMapFromCache parse error:", err);
+    return {};
+  }
+}
+
+function buildWatchlistStatus(insight, stock) {
+  if (stock?.isDispositionStock && stock?.isAttentionStock) {
+    return "處置股 / 注意股";
+  }
+  if (stock?.isDispositionStock) return "處置股";
+  if (stock?.isAttentionStock) return "注意股";
+  if (!insight) return "正常";
+  if (insight.riskLevel === "盤中走弱") return "盤中走弱";
+  if (insight.riskLevel === "高風險觀察") return "高風險觀察";
+  if (insight.comment?.includes("走弱")) return "短線走弱";
+  if (insight.comment?.includes("跌破")) return "跌破均線";
+  return insight.riskLevel || "正常";
+}
+
+async function buildWatchlistSummaryText(conversationId) {
+  const watchlist = await getStockWatchlist(conversationId);
+  if (!watchlist.length) {
+    return "目前這個聊天室還沒有自選股。可以直接說「加入自選 2330」。";
+  }
+
+  const stocksMap = await getStocksMapFromCache();
+  const replyLimit =
+    Number.isFinite(STOCK_WATCHLIST_SUMMARY_REPLY_LIMIT) &&
+    STOCK_WATCHLIST_SUMMARY_REPLY_LIMIT > 0
+      ? STOCK_WATCHLIST_SUMMARY_REPLY_LIMIT
+      : 8;
+  const targets = watchlist.slice(0, replyLimit);
+  const lines = ["📌 自選股摘要"];
+
+  for (let index = 0; index < targets.length; index += 1) {
+    const item = targets[index];
+    const stock = stocksMap[item.code] || item;
+    try {
+      const result = await getStockQuoteWithFallback(stock);
+      if (!result?.quote) {
+        lines.push(
+          `\n${index + 1}. ${item.name}（${item.code}）\n狀態：行情資料暫時取得失敗`
+        );
+        continue;
+      }
+
+      const quote = result.quote;
+      const baseInsight = await buildSingleStockInsight(stock);
+      const insight = adjustSingleStockInsightForIntraday(
+        baseInsight,
+        quote,
+        result.source
+      );
+      const marketOpen = isTaiwanStockMarketOpen();
+      const isRealtimeQuote = result.source?.includes("realtime");
+      const isOfficialDailyQuote = result.source === "official-daily";
+      const priceLabel = isRealtimeQuote
+        ? "現價"
+        : isOfficialDailyQuote
+        ? "收盤"
+        : marketOpen
+        ? "最新價"
+        : "收盤";
+      const percent =
+        typeof quote.changePercent === "number" && Number.isFinite(quote.changePercent)
+          ? `${quote.changePercent > 0 ? "+" : ""}${quote.changePercent.toFixed(2)}%`
+          : "--";
+      lines.push(
+        `\n${index + 1}. ${item.name}（${item.code}）`,
+        `${priceLabel}：${fmtTWPrice(quote.price)}｜漲跌：${percent}`,
+        `狀態：${buildWatchlistStatus(insight, stock)}`
+      );
+    } catch (err) {
+      console.error("buildWatchlistSummaryText failed:", item?.code, err);
+      lines.push(
+        `\n${index + 1}. ${item.name}（${item.code}）\n狀態：摘要暫時產生失敗`
+      );
+    }
+  }
+
+  if (watchlist.length > targets.length) {
+    lines.push(`\n其餘 ${watchlist.length - targets.length} 檔未展開，可用「移除自選」或之後再查。`);
+  }
+
+  return lines.join("\n");
 }
 
 function pad2(v) {
@@ -4682,6 +4958,12 @@ const STOCK_REALTIME_TIMEOUT_MS = Number(
   process.env.STOCK_REALTIME_TIMEOUT_MS || 5000
 );
 const STOCK_INTRADAY_WATCHLIST_KEY = "stock:intraday:watchlist";
+const STOCK_WATCHLIST_MAX_ITEMS = Number(
+  process.env.STOCK_WATCHLIST_MAX_ITEMS || 20
+);
+const STOCK_WATCHLIST_SUMMARY_REPLY_LIMIT = Number(
+  process.env.STOCK_WATCHLIST_SUMMARY_REPLY_LIMIT || 8
+);
 const STOCK_INTRADAY_TTL_SECONDS = Number(
   process.env.STOCK_INTRADAY_TTL_SECONDS || 60 * 60 * 36
 );
@@ -9192,6 +9474,88 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
       if (/^你可以幫我做什麼$/.test(parsedMessage || userMessage)) {
         await replyMessageWithFallback(event, buildBotCapabilityMessage());
+        continue;
+      }
+
+      const addWatchlistCommand = parseWatchlistAddCommand(parsedMessage || userMessage);
+      if (addWatchlistCommand) {
+        const stock = await findStock(addWatchlistCommand.query);
+        if (!stock || stock.market === "UNKNOWN") {
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: "我找不到這檔股票 😅\n可以試試「加入自選 2330」或「加入自選 台積電」",
+          });
+          continue;
+        }
+
+        const added = await addStockToWatchlist(
+          conversationId,
+          reminderTarget,
+          stock
+        );
+        if (!added?.ok) {
+          const errorText =
+            added?.reason === "limit-exceeded"
+              ? `這個聊天室的自選股已達上限（${added.limit || 20} 檔），請先移除一些。`
+              : "加入自選失敗，可能是暫時連不上資料庫，請晚點再試。";
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: errorText,
+          });
+          continue;
+        }
+
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: added.duplicate
+            ? `已在這個聊天室的自選清單內：${added.item.name}（${added.item.code}）`
+            : `已加入自選：${added.item.name}（${added.item.code}）`,
+        });
+        continue;
+      }
+
+      if (isWatchlistSummaryCommand(parsedMessage || userMessage)) {
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: await buildWatchlistSummaryText(conversationId),
+        });
+        continue;
+      }
+
+      if (isWatchlistListCommand(parsedMessage || userMessage)) {
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: formatWatchlistListText(await getStockWatchlist(conversationId)),
+        });
+        continue;
+      }
+
+      const removeWatchlistCommand = parseWatchlistRemoveCommand(
+        parsedMessage || userMessage
+      );
+      if (removeWatchlistCommand) {
+        const removed = await removeStockFromWatchlist(
+          conversationId,
+          removeWatchlistCommand
+        );
+        if (!removed?.ok) {
+          const errorText =
+            removed?.reason === "empty"
+              ? "目前這個聊天室還沒有自選股。可以直接說「加入自選 2330」。"
+              : removed?.reason === "not-found"
+              ? "找不到要移除的自選股。先輸入「自選股」看目前清單。"
+              : "移除自選失敗，可能是暫時連不上資料庫，請晚點再試。";
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: errorText,
+          });
+          continue;
+        }
+
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: `已移除自選：${removed.item.name}（${removed.item.code}）`,
+        });
         continue;
       }
 
