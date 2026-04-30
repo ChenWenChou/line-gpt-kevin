@@ -1075,9 +1075,21 @@ function formatWatchlistMarketLabel(item) {
     : "上市";
 }
 
-function formatWatchlistListText(items = []) {
+function formatSuggestedCommandText(text = "", sourceType = "user") {
+  const raw = String(text || "").trim();
+  if (!raw) return raw;
+  if (sourceType === "group" || sourceType === "room") {
+    return prefixBotCommandIfNeeded(raw, sourceType);
+  }
+  return raw;
+}
+
+function formatWatchlistListText(items = [], sourceType = "user") {
   if (!items.length) {
-    return "目前這個聊天室還沒有自選股。可以直接說「加入自選 2330」。";
+    return `目前這個聊天室還沒有自選股。可以直接說「${formatSuggestedCommandText(
+      "加入自選 2330",
+      sourceType
+    )}」。`;
   }
 
   const body = items
@@ -1086,7 +1098,10 @@ function formatWatchlistListText(items = []) {
         `${index + 1}. ${item.name}（${item.code}｜${formatWatchlistMarketLabel(item)}）`
     )
     .join("\n");
-  return `目前自選股：\n${body}\n\n可直接說：\n- 自選股摘要\n- 移除自選 2`;
+  return `目前自選股：\n${body}\n\n可直接說：\n- ${formatSuggestedCommandText(
+    "自選股摘要",
+    sourceType
+  )}\n- ${formatSuggestedCommandText("移除自選 2", sourceType)}`;
 }
 
 async function addStockToWatchlist(conversationId, target, stock) {
@@ -9631,7 +9646,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         }
         await replyMessageWithFallback(event, {
           type: "text",
-          text: formatWatchlistListText(watchlist),
+          text: formatWatchlistListText(watchlist, event.source.type),
         });
         continue;
       }
