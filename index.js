@@ -1084,6 +1084,12 @@ function formatSuggestedCommandText(text = "", sourceType = "user") {
   return raw;
 }
 
+function formatSuggestedCommandExamples(commands = [], sourceType = "user") {
+  return commands
+    .map((command) => `「${formatSuggestedCommandText(command, sourceType)}」`)
+    .join("、");
+}
+
 function formatWatchlistListText(items = [], sourceType = "user") {
   if (!items.length) {
     return `目前這個聊天室還沒有自選股。可以直接說「${formatSuggestedCommandText(
@@ -1205,13 +1211,20 @@ function buildWatchlistStatus(insight, stock) {
   return insight.riskLevel || "正常";
 }
 
-async function buildWatchlistSummaryText(conversationId, target = null) {
+async function buildWatchlistSummaryText(
+  conversationId,
+  target = null,
+  sourceType = "user"
+) {
   let watchlist = await getStockWatchlist(conversationId);
   if (!watchlist.length && target) {
     watchlist = await migrateLegacyGroupWatchlist(conversationId, target);
   }
   if (!watchlist.length) {
-    return "目前這個聊天室還沒有自選股。可以直接說「加入自選 2330」。";
+    return `目前這個聊天室還沒有自選股。可以直接說「${formatSuggestedCommandText(
+      "加入自選 2330",
+      sourceType
+    )}」。`;
   }
 
   const stocksMap = await getStocksMapFromCache();
@@ -2005,7 +2018,10 @@ async function buildWeatherHelpMessage(conversationId, sourceType = "user") {
     { label: "桃園今天天氣", text: "桃園今天天氣" }
   );
   return createQuickReplyMessage(
-    "你可以直接問：「台北現在天氣」、「桃園明天天氣」、「信義區現在會下雨嗎」",
+    `你可以直接問：${formatSuggestedCommandExamples(
+      ["台北現在天氣", "桃園明天天氣", "信義區現在會下雨嗎"],
+      sourceType
+    )}`,
     actions,
     { sourceType }
   );
@@ -2027,7 +2043,10 @@ async function buildStockHelpMessage(conversationId, sourceType = "user") {
     { label: "2330 行情", text: "2330 行情" }
   );
   return createQuickReplyMessage(
-    "你可以直接問：「2330 行情」、「6168 股價」、「自選股摘要」、「40元內強勢股」",
+    `你可以直接問：${formatSuggestedCommandExamples(
+      ["2330 行情", "6168 股價", "自選股摘要", "40元內強勢股"],
+      sourceType
+    )}`,
     actions,
     { sourceType }
   );
@@ -2047,7 +2066,10 @@ async function buildZodiacHelpMessage(conversationId, sourceType = "user") {
     { label: "雙子座今日運勢", text: "雙子座今日運勢" }
   );
   return createQuickReplyMessage(
-    "你可以直接問：「雙子座今日運勢」、「天蠍座明日運勢」",
+    `你可以直接問：${formatSuggestedCommandExamples(
+      ["雙子座今日運勢", "天蠍座明日運勢"],
+      sourceType
+    )}`,
     actions,
     { sourceType }
   );
@@ -2055,7 +2077,10 @@ async function buildZodiacHelpMessage(conversationId, sourceType = "user") {
 
 function buildCalorieHelpMessage(sourceType = "user") {
   return createQuickReplyMessage(
-    "你可以直接問：「雞腿便當熱量」、「蛋餅加奶茶熱量」、「我今天吃了飯糰、豆漿」",
+    `你可以直接問：${formatSuggestedCommandExamples(
+      ["雞腿便當熱量", "蛋餅加奶茶熱量", "我今天吃了飯糰、豆漿"],
+      sourceType
+    )}`,
     [
       { label: "雞腿便當熱量", text: "雞腿便當熱量" },
       { label: "蛋餅熱量", text: "蛋餅熱量" },
@@ -9447,7 +9472,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           type: "text",
           text: `目前提醒清單：\n${reminders
             .map((item, idx) => formatReminderListItem(item, idx + 1))
-            .join("\n")}\n\n要取消可直接說「取消提醒 1」。`,
+            .join("\n")}\n\n要取消可直接說「${formatSuggestedCommandText(
+            "取消提醒 1",
+            event.source.type
+          )}」。`,
         });
         continue;
       }
@@ -9459,7 +9487,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         if (!targetReminder) {
           await replyMessageWithFallback(event, {
             type: "text",
-            text: `找不到第 ${cancelReminder.index} 筆提醒。先輸入「提醒清單」看目前編號。`,
+            text: `找不到第 ${cancelReminder.index} 筆提醒。先輸入「${formatSuggestedCommandText(
+              "提醒清單",
+              event.source.type
+            )}」看目前編號。`,
           });
           continue;
         }
@@ -9488,7 +9519,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         if (parsedReminder?.error === "missing_weather_location") {
           await replyMessageWithFallback(event, {
             type: "text",
-            text: "這種帶傘提醒需要先知道地點。你可以直接說「每天早上七點提醒我桃園今天可能下雨要帶傘」，或先查過一次當地天氣。",
+            text: `這種帶傘提醒需要先知道地點。你可以直接說「${formatSuggestedCommandText(
+              "每天早上七點提醒我桃園今天可能下雨要帶傘",
+              event.source.type
+            )}」，或先查過一次當地天氣。`,
           });
           continue;
         }
@@ -9597,7 +9631,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         if (!stock || stock.market === "UNKNOWN") {
           await replyMessageWithFallback(event, {
             type: "text",
-            text: "我找不到這檔股票 😅\n可以試試「加入自選 2330」或「加入自選 台積電」",
+            text: `我找不到這檔股票 😅\n可以試試${formatSuggestedCommandExamples(
+              ["加入自選 2330", "加入自選 台積電"],
+              event.source.type
+            )}`,
           });
           continue;
         }
@@ -9631,7 +9668,11 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       if (isWatchlistSummaryCommand(parsedMessage || userMessage)) {
         await replyMessageWithFallback(event, {
           type: "text",
-          text: await buildWatchlistSummaryText(conversationId, reminderTarget),
+          text: await buildWatchlistSummaryText(
+            conversationId,
+            reminderTarget,
+            event.source.type
+          ),
         });
         continue;
       }
@@ -9663,9 +9704,15 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         if (!removed?.ok) {
           const errorText =
             removed?.reason === "empty"
-              ? "目前這個聊天室還沒有自選股。可以直接說「加入自選 2330」。"
+              ? `目前這個聊天室還沒有自選股。可以直接說「${formatSuggestedCommandText(
+                  "加入自選 2330",
+                  event.source.type
+                )}」。`
               : removed?.reason === "not-found"
-              ? "找不到要移除的自選股。先輸入「自選股」看目前清單。"
+              ? `找不到要移除的自選股。先輸入「${formatSuggestedCommandText(
+                  "自選股",
+                  event.source.type
+                )}」看目前清單。`
               : "移除自選失敗，可能是暫時連不上資料庫，請晚點再試。";
           await replyMessageWithFallback(event, {
             type: "text",
@@ -9794,7 +9841,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         if (!stock) {
           await replyMessageWithFallback(event, {
             type: "text",
-            text: "我找不到這檔股票 😅\n可以試試「3221 線圖」或「2330 K線」",
+            text: `我找不到這檔股票 😅\n可以試試${formatSuggestedCommandExamples(
+              ["3221 線圖", "2330 K線"],
+              event.source.type
+            )}`,
           });
           continue;
         }
@@ -9827,7 +9877,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         if (!stock) {
           await replyMessageWithFallback(event, {
             type: "text",
-            text: "我找不到這檔股票 😅\n可以試試「2330 行情」或「台積電 股價」",
+            text: `我找不到這檔股票 😅\n可以試試${formatSuggestedCommandExamples(
+              ["2330 行情", "台積電 股價"],
+              event.source.type
+            )}`,
           });
           continue;
         }
