@@ -977,7 +977,7 @@ function isWatchlistSummaryCommand(text = "") {
 
 function parseWatchlistAddCommand(text = "") {
   const raw = String(text || "").trim();
-  const matched = raw.match(/^(?:加入自選|自選|追蹤)\s+(.+)$/);
+  const matched = raw.match(/^(?:加入自選|自選|追蹤)\s*(.+)$/);
   if (!matched) return null;
   const query = String(matched[1] || "").trim();
   if (!query) return null;
@@ -986,7 +986,7 @@ function parseWatchlistAddCommand(text = "") {
 
 function parseWatchlistRemoveCommand(text = "") {
   const raw = String(text || "").trim();
-  const matched = raw.match(/^(?:移除自選|刪除自選|取消追蹤)\s+(.+)$/);
+  const matched = raw.match(/^(?:移除自選|刪除自選|取消追蹤)\s*(.+)$/);
   if (!matched) return null;
   const target = String(matched[1] || "").trim();
   if (!target) return null;
