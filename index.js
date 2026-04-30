@@ -1925,11 +1925,13 @@ async function buildStockHelpMessage(conversationId, sourceType = "user") {
     });
   }
   actions.push(
+    { label: "自選股", text: "自選股" },
+    { label: "自選股摘要", text: "自選股摘要" },
     { label: "今日盤後推薦股", text: "今日盤後推薦股" },
     { label: "2330 行情", text: "2330 行情" }
   );
   return createQuickReplyMessage(
-    "你可以直接問：「2330 行情」、「6168 股價」、「40元內強勢股」",
+    "你可以直接問：「2330 行情」、「6168 股價」、「自選股摘要」、「40元內強勢股」",
     actions,
     { sourceType }
   );
@@ -9326,6 +9328,14 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         ? await getLastWeatherContext(userId)
         : null;
       const reminderTarget = buildReminderTarget(event);
+
+      if (!parsedMessage && /^(助理|KevinBot|kevinbot)\s*$/i.test(rawMessage)) {
+        await replyMessageWithFallback(
+          event,
+          buildCommonFeaturesMessage(event.source.type)
+        );
+        continue;
+      }
 
       if (isReminderListCommand(parsedMessage || userMessage)) {
         const reminders = await getRemindersForTarget(reminderTarget, 10);
