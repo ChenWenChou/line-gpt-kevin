@@ -1506,7 +1506,16 @@ function formatReminderListItem(reminder, index) {
   return `${index}. ${reminder?.nextDueLabel || "--"}｜${reminder?.text || "未命名提醒"}`;
 }
 
-function createQuickReplyMessage(text, items = []) {
+function prefixBotCommandIfNeeded(text = "", sourceType = "user") {
+  const raw = String(text || "").trim();
+  if (!raw) return raw;
+  if (sourceType !== "group" && sourceType !== "room") return raw;
+  if (/^(助理|KevinBot|kevinbot)\s+/i.test(raw)) return raw;
+  return `助理 ${raw}`;
+}
+
+function createQuickReplyMessage(text, items = [], options = {}) {
+  const sourceType = String(options?.sourceType || "user").trim();
   const quickReplyItems = items
     .map((item) => {
       const label = String(item?.label || "").trim();
@@ -1517,7 +1526,7 @@ function createQuickReplyMessage(text, items = []) {
         action: {
           type: "message",
           label: label.slice(0, 20),
-          text: sendText,
+          text: prefixBotCommandIfNeeded(sendText, sourceType),
         },
       };
     })
@@ -1535,7 +1544,7 @@ function createQuickReplyMessage(text, items = []) {
     : { type: "text", text };
 }
 
-async function buildWeatherHelpMessage(conversationId) {
+async function buildWeatherHelpMessage(conversationId, sourceType = "user") {
   const recents = await getRecentHelpItems("weather", conversationId);
   const actions = [];
   for (const city of recents.slice(0, 2)) {
@@ -1550,11 +1559,12 @@ async function buildWeatherHelpMessage(conversationId) {
   );
   return createQuickReplyMessage(
     "你可以直接問：「台北現在天氣」、「桃園明天天氣」、「信義區現在會下雨嗎」",
-    actions
+    actions,
+    { sourceType }
   );
 }
 
-async function buildStockHelpMessage(conversationId) {
+async function buildStockHelpMessage(conversationId, sourceType = "user") {
   const recents = await getRecentHelpItems("stock", conversationId);
   const actions = [];
   for (const code of recents.slice(0, 2)) {
@@ -1569,11 +1579,12 @@ async function buildStockHelpMessage(conversationId) {
   );
   return createQuickReplyMessage(
     "你可以直接問：「2330 行情」、「6168 股價」、「40元內強勢股」",
-    actions
+    actions,
+    { sourceType }
   );
 }
 
-async function buildZodiacHelpMessage(conversationId) {
+async function buildZodiacHelpMessage(conversationId, sourceType = "user") {
   const recents = await getRecentHelpItems("zodiac", conversationId);
   const actions = [];
   for (const sign of recents.slice(0, 2)) {
@@ -1588,11 +1599,12 @@ async function buildZodiacHelpMessage(conversationId) {
   );
   return createQuickReplyMessage(
     "你可以直接問：「雙子座今日運勢」、「天蠍座明日運勢」",
-    actions
+    actions,
+    { sourceType }
   );
 }
 
-function buildCalorieHelpMessage() {
+function buildCalorieHelpMessage(sourceType = "user") {
   return createQuickReplyMessage(
     "你可以直接問：「雞腿便當熱量」、「蛋餅加奶茶熱量」、「我今天吃了飯糰、豆漿」",
     [
@@ -1600,11 +1612,12 @@ function buildCalorieHelpMessage() {
       { label: "蛋餅熱量", text: "蛋餅熱量" },
       { label: "珍珠奶茶熱量", text: "珍珠奶茶熱量" },
       { label: "蛋餅加奶茶", text: "我今天吃了蛋餅加奶茶" },
-    ]
+    ],
+    { sourceType }
   );
 }
 
-function buildCommonFeaturesMessage() {
+function buildCommonFeaturesMessage(sourceType = "user") {
   return createQuickReplyMessage("常用功能如下，直接點一個。", [
     { label: "天氣", text: "天氣幫助" },
     { label: "股票", text: "股票幫助" },
@@ -1612,7 +1625,7 @@ function buildCommonFeaturesMessage() {
     { label: "星座", text: "星座幫助" },
     { label: "熱量", text: "熱量幫助" },
     { label: "更多", text: "你可以幫我做什麼" },
-  ]);
+  ], { sourceType });
 }
 
 function buildBotCapabilityMessage() {
@@ -9073,7 +9086,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       if (/^天氣幫助$/.test(parsedMessage || userMessage)) {
         await replyMessageWithFallback(
           event,
-          await buildWeatherHelpMessage(conversationId)
+          await buildWeatherHelpMessage(conversationId, event.source.type)
         );
         continue;
       }
@@ -9081,7 +9094,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       if (/^股票幫助$/.test(parsedMessage || userMessage)) {
         await replyMessageWithFallback(
           event,
-          await buildStockHelpMessage(conversationId)
+          await buildStockHelpMessage(conversationId, event.source.type)
         );
         continue;
       }
@@ -9089,18 +9102,24 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       if (/^星座幫助$/.test(parsedMessage || userMessage)) {
         await replyMessageWithFallback(
           event,
-          await buildZodiacHelpMessage(conversationId)
+          await buildZodiacHelpMessage(conversationId, event.source.type)
         );
         continue;
       }
 
       if (/^熱量幫助$/.test(parsedMessage || userMessage)) {
-        await replyMessageWithFallback(event, buildCalorieHelpMessage());
+        await replyMessageWithFallback(
+          event,
+          buildCalorieHelpMessage(event.source.type)
+        );
         continue;
       }
 
       if (/^常用功能$/.test(parsedMessage || userMessage)) {
-        await replyMessageWithFallback(event, buildCommonFeaturesMessage());
+        await replyMessageWithFallback(
+          event,
+          buildCommonFeaturesMessage(event.source.type)
+        );
         continue;
       }
 
