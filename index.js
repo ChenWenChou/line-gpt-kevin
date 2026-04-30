@@ -977,11 +977,19 @@ function isWatchlistSummaryCommand(text = "") {
 
 function parseWatchlistAddCommand(text = "") {
   const raw = String(text || "").trim();
-  const matched = raw.match(/^(?:加入自選|自選|追蹤)\s*(.+)$/);
-  if (!matched) return null;
-  const query = String(matched[1] || "").trim();
-  if (!query) return null;
-  return { query };
+  if (/^加入自選/.test(raw)) {
+    const query = raw.replace(/^加入自選\s*/, "").trim();
+    return query ? { query } : null;
+  }
+  if (/^追蹤/.test(raw)) {
+    const query = raw.replace(/^追蹤\s*/, "").trim();
+    return query ? { query } : null;
+  }
+  if (/^自選(?!股)/.test(raw)) {
+    const query = raw.replace(/^自選\s*/, "").trim();
+    return query ? { query } : null;
+  }
+  return null;
 }
 
 function parseWatchlistRemoveCommand(text = "") {
