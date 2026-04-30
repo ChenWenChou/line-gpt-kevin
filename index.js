@@ -167,6 +167,17 @@ async function redisSAdd(key, member) {
   }
 }
 
+async function redisSRem(key, member) {
+  if (!(await ensureRedisReady())) return 0;
+  try {
+    const removed = await redisClient.srem(key, member);
+    return Number.isFinite(removed) ? removed : 0;
+  } catch (err) {
+    markRedisUnavailable(err, `SREM failed (${key})`);
+    return 0;
+  }
+}
+
 async function redisSMembers(key) {
   if (!(await ensureRedisReady())) return [];
   try {
@@ -787,6 +798,11 @@ function getStockWatchlistKey(conversationId) {
   return `stock:watchlist:v1:${conversationId}`;
 }
 
+function getWatchlistNewsSubscriptionKey(conversationId) {
+  if (!conversationId) return null;
+  return `stock:watchlist:news-subscription:v1:${conversationId}`;
+}
+
 function sanitizeChatContent(text) {
   const t = String(text || "").trim();
   if (!t) return "";
@@ -1035,6 +1051,28 @@ function isWatchlistSummaryCommand(text = "") {
   return /^(自選股摘要|我的自選摘要)$/.test(String(text || "").trim());
 }
 
+function isWatchlistNewsCommand(text = "") {
+  return /^(自選股新聞|我的自選股新聞)$/.test(String(text || "").trim());
+}
+
+function isWatchlistNewsSubscribeCommand(text = "") {
+  return /^(訂閱自選股新聞|開啟自選股新聞訂閱)$/.test(
+    String(text || "").trim()
+  );
+}
+
+function isWatchlistNewsUnsubscribeCommand(text = "") {
+  return /^(取消訂閱自選股新聞|關閉自選股新聞訂閱)$/.test(
+    String(text || "").trim()
+  );
+}
+
+function isWatchlistNewsSubscriptionStatusCommand(text = "") {
+  return /^(自選股新聞訂閱狀態|查看自選股新聞訂閱)$/.test(
+    String(text || "").trim()
+  );
+}
+
 function parseWatchlistAddCommand(text = "") {
   const raw = String(text || "").trim();
   if (/^加入自選/.test(raw)) {
@@ -1108,6 +1146,106 @@ function formatWatchlistListText(items = [], sourceType = "user") {
     "自選股摘要",
     sourceType
   )}\n- ${formatSuggestedCommandText("移除自選 2", sourceType)}`;
+}
+
+function normalizeWatchlistNewsSubscription(payload, fallback = {}) {
+  if (!payload || typeof payload !== "object") return null;
+  const conversationId = payload.conversationId || fallback.conversationId || null;
+  if (!conversationId) return null;
+
+  return {
+    conversationId,
+    targetType: payload.targetType || fallback.targetType || null,
+    targetId: payload.targetId || fallback.targetId || null,
+    enabled: payload.enabled !== false,
+    hour:
+      Number.isFinite(payload.hour) && payload.hour >= 0 && payload.hour <= 23
+        ? Number(payload.hour)
+        : 8,
+    minute:
+      Number.isFinite(payload.minute) && payload.minute >= 0 && payload.minute <= 59
+        ? Number(payload.minute)
+        : 30,
+    createdAt:
+      Number.isFinite(payload.createdAt) && payload.createdAt > 0
+        ? Number(payload.createdAt)
+        : Date.now(),
+    updatedAt:
+      Number.isFinite(payload.updatedAt) && payload.updatedAt > 0
+        ? Number(payload.updatedAt)
+        : Date.now(),
+  };
+}
+
+async function getWatchlistNewsSubscription(conversationId) {
+  const key = getWatchlistNewsSubscriptionKey(conversationId);
+  if (!key) return null;
+
+  try {
+    const raw = await redisGet(key);
+    if (!raw) return null;
+    return normalizeWatchlistNewsSubscription(JSON.parse(raw), {
+      conversationId,
+    });
+  } catch (err) {
+    console.error("getWatchlistNewsSubscription parse error:", err);
+    return null;
+  }
+}
+
+async function saveWatchlistNewsSubscription(conversationId, target, patch = {}) {
+  const key = getWatchlistNewsSubscriptionKey(conversationId);
+  if (!key || !target?.targetId || !target?.targetType) return null;
+
+  const existing = await getWatchlistNewsSubscription(conversationId);
+  const next = normalizeWatchlistNewsSubscription(
+    {
+      ...(existing || {}),
+      ...patch,
+      conversationId,
+      targetType: target.targetType,
+      targetId: target.targetId,
+      enabled: patch.enabled !== false,
+      updatedAt: Date.now(),
+      createdAt: existing?.createdAt || Date.now(),
+    },
+    {
+      conversationId,
+      targetType: target.targetType,
+      targetId: target.targetId,
+    }
+  );
+  if (!next) return null;
+
+  const saved = await redisSet(key, JSON.stringify(next));
+  if (!saved) return null;
+  await redisSAdd(STOCK_WATCHLIST_NEWS_SUBSCRIPTION_INDEX_KEY, conversationId);
+  return next;
+}
+
+async function deleteWatchlistNewsSubscription(conversationId) {
+  const key = getWatchlistNewsSubscriptionKey(conversationId);
+  if (!key) return 0;
+  await redisSRem(STOCK_WATCHLIST_NEWS_SUBSCRIPTION_INDEX_KEY, conversationId);
+  return redisDel(key);
+}
+
+function formatWatchlistNewsSubscriptionStatus(subscription, sourceType = "user") {
+  if (!subscription?.enabled) {
+    return `目前這個聊天室尚未訂閱自選股新聞。可以直接說「${formatSuggestedCommandText(
+      "訂閱自選股新聞",
+      sourceType
+    )}」。`;
+  }
+
+  return [
+    "目前自選股新聞訂閱狀態：已開啟",
+    `推播時間：每天 ${pad2(subscription.hour)}:${pad2(subscription.minute)}`,
+    `可直接說：${formatSuggestedCommandText(
+      "取消訂閱自選股新聞",
+      sourceType
+    )}`,
+  ].join("\n");
 }
 
 async function addStockToWatchlist(conversationId, target, stock) {
@@ -1286,6 +1424,101 @@ async function buildWatchlistSummaryText(
     lines.push(`\n其餘 ${watchlist.length - targets.length} 檔未展開，可用「移除自選」或之後再查。`);
   }
 
+  return lines.join("\n");
+}
+
+async function buildWatchlistNewsDigestText(
+  conversationId,
+  target = null,
+  sourceType = "user",
+  options = {}
+) {
+  let watchlist = await getStockWatchlist(conversationId);
+  if (!watchlist.length && target) {
+    watchlist = await migrateLegacyGroupWatchlist(conversationId, target);
+  }
+  if (!watchlist.length) {
+    return `目前這個聊天室還沒有自選股。可以先說「${formatSuggestedCommandText(
+      "加入自選 2330",
+      sourceType
+    )}」，再查「${formatSuggestedCommandText(
+      "自選股新聞",
+      sourceType
+    )}」。`;
+  }
+
+  const stocksMap = await getStocksMapFromCache();
+  const replyLimit =
+    Number.isFinite(STOCK_WATCHLIST_NEWS_REPLY_LIMIT) &&
+    STOCK_WATCHLIST_NEWS_REPLY_LIMIT > 0
+      ? STOCK_WATCHLIST_NEWS_REPLY_LIMIT
+      : 5;
+  const targets = watchlist.slice(0, replyLimit);
+  const dateLabel = new Intl.DateTimeFormat("zh-TW", {
+    timeZone: "Asia/Taipei",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date());
+  const lines = [
+    options.mode === "push" ? "📌 自選股新聞晨報" : "📌 自選股新聞摘要",
+    `資料時間：${dateLabel}`,
+    "說明：第一版先整理自選股重點狀態與官方市場提示，公告新聞擷取下一批補齊。",
+  ];
+
+  for (let index = 0; index < targets.length; index += 1) {
+    const item = targets[index];
+    const stock = stocksMap[item.code] || item;
+    try {
+      const result = await getStockQuoteWithFallback(stock);
+      const quote = result?.quote || null;
+      const insight = quote
+        ? adjustSingleStockInsightForIntraday(
+            await buildSingleStockInsight(stock),
+            quote,
+            result.source
+          )
+        : null;
+      const status = buildWatchlistStatus(insight, stock);
+      const percent =
+        typeof quote?.changePercent === "number" && Number.isFinite(quote.changePercent)
+          ? `${quote.changePercent > 0 ? "+" : ""}${quote.changePercent.toFixed(2)}%`
+          : "--";
+      const priceText = quote ? fmtTWPrice(quote.price) : "--";
+      const alertText = stock?.isDispositionStock
+        ? "處置股"
+        : stock?.isAttentionStock
+        ? "注意股"
+        : "目前未命中注意 / 處置股";
+      const summaryText = insight?.comment || "尚未整理出進一步判讀。";
+
+      lines.push(
+        `\n${index + 1}. ${item.name}（${item.code}）`,
+        `- 行情：${priceText}｜漲跌：${percent}`,
+        `- 官方市場提示：${alertText}`,
+        `- 判讀：${status}`,
+        `- 摘要：${summaryText}`
+      );
+    } catch (err) {
+      console.error("buildWatchlistNewsDigestText failed:", item?.code, err);
+      lines.push(
+        `\n${index + 1}. ${item.name}（${item.code}）`,
+        "- 官方市場提示：資料暫時取得失敗",
+        "- 摘要：這檔先保留在追蹤名單，稍後再查一次。"
+      );
+    }
+  }
+
+  if (watchlist.length > targets.length) {
+    lines.push(`\n其餘 ${watchlist.length - targets.length} 檔未展開。`);
+  }
+
+  lines.push(
+    "",
+    `可直接說：${formatSuggestedCommandText("訂閱自選股新聞", sourceType)}`
+  );
   return lines.join("\n");
 }
 
@@ -5089,11 +5322,22 @@ const STOCK_REALTIME_TIMEOUT_MS = Number(
   process.env.STOCK_REALTIME_TIMEOUT_MS || 5000
 );
 const STOCK_INTRADAY_WATCHLIST_KEY = "stock:intraday:watchlist";
+const STOCK_WATCHLIST_NEWS_SUBSCRIPTION_INDEX_KEY =
+  "stock:watchlist:news-subscription:index:v1";
 const STOCK_WATCHLIST_MAX_ITEMS = Number(
   process.env.STOCK_WATCHLIST_MAX_ITEMS || 20
 );
 const STOCK_WATCHLIST_SUMMARY_REPLY_LIMIT = Number(
   process.env.STOCK_WATCHLIST_SUMMARY_REPLY_LIMIT || 8
+);
+const STOCK_WATCHLIST_NEWS_REPLY_LIMIT = Number(
+  process.env.STOCK_WATCHLIST_NEWS_REPLY_LIMIT || 5
+);
+const STOCK_WATCHLIST_NEWS_PUSH_HOUR = Number(
+  process.env.STOCK_WATCHLIST_NEWS_PUSH_HOUR || 8
+);
+const STOCK_WATCHLIST_NEWS_PUSH_MINUTE = Number(
+  process.env.STOCK_WATCHLIST_NEWS_PUSH_MINUTE || 30
 );
 const STOCK_INTRADAY_TTL_SECONDS = Number(
   process.env.STOCK_INTRADAY_TTL_SECONDS || 60 * 60 * 36
@@ -9301,6 +9545,103 @@ function isCronAuthorized(req) {
   return false;
 }
 
+function getWatchlistNewsPushDedupKey(conversationId, dateKey) {
+  if (!conversationId || !dateKey) return null;
+  return `stock:watchlist:news:lastpush:${conversationId}:${dateKey}`;
+}
+
+function getTaipeiDateParts(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  })
+    .formatToParts(now)
+    .reduce((acc, part) => {
+      acc[part.type] = part.value;
+      return acc;
+    }, {});
+
+  return {
+    dateKey: `${parts.year}-${parts.month}-${parts.day}`,
+    hour: Number(parts.hour || 0),
+    minute: Number(parts.minute || 0),
+  };
+}
+
+async function pushWatchlistNewsSubscriptions(now = new Date()) {
+  const { dateKey, hour, minute } = getTaipeiDateParts(now);
+  const members = await redisSMembers(STOCK_WATCHLIST_NEWS_SUBSCRIPTION_INDEX_KEY);
+  let subscribed = 0;
+  let pushed = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const conversationId of members) {
+    const subscription = await getWatchlistNewsSubscription(conversationId);
+    if (!subscription?.enabled || !subscription?.targetId || !subscription?.targetType) {
+      skipped += 1;
+      continue;
+    }
+    subscribed += 1;
+
+    const expectedHour =
+      Number.isFinite(subscription.hour) && subscription.hour >= 0
+        ? subscription.hour
+        : STOCK_WATCHLIST_NEWS_PUSH_HOUR;
+    const expectedMinute =
+      Number.isFinite(subscription.minute) && subscription.minute >= 0
+        ? subscription.minute
+        : STOCK_WATCHLIST_NEWS_PUSH_MINUTE;
+
+    if (hour !== expectedHour || minute !== expectedMinute) {
+      skipped += 1;
+      continue;
+    }
+
+    const dedupKey = getWatchlistNewsPushDedupKey(conversationId, dateKey);
+    const acquired = dedupKey ? await redisSetNx(dedupKey, "1", 60 * 60 * 18) : null;
+    if (acquired === false) {
+      skipped += 1;
+      continue;
+    }
+
+    try {
+      const text = await buildWatchlistNewsDigestText(
+        conversationId,
+        subscription,
+        subscription.targetType === "group" || subscription.targetType === "room"
+          ? "group"
+          : "user",
+        { mode: "push" }
+      );
+      await client.pushMessage(subscription.targetId, {
+        type: "text",
+        text,
+      });
+      pushed += 1;
+    } catch (err) {
+      console.error("pushWatchlistNewsSubscriptions failed:", conversationId, err);
+      failed += 1;
+    }
+  }
+
+  return {
+    ok: true,
+    dateKey,
+    hour,
+    minute,
+    subscribed,
+    pushed,
+    skipped,
+    failed,
+  };
+}
+
 app.post("/api/generate-bible-cards", async (req, res) => {
   if (!isCronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
@@ -9383,6 +9724,23 @@ app.get("/api/run-reminders", async (req, res) => {
     failed,
     stockSnapshots,
   });
+});
+
+app.get("/api/push-watchlist-news", async (req, res) => {
+  if (!isCronAuthorized(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  try {
+    const stats = await pushWatchlistNewsSubscriptions(new Date());
+    return res.json(stats);
+  } catch (err) {
+    console.error("push watchlist news failed:", err);
+    return res.status(500).json({
+      ok: false,
+      error: String(err?.message || err),
+    });
+  }
 });
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
@@ -9622,6 +9980,93 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
 
       if (/^你可以幫我做什麼$/.test(parsedMessage || userMessage)) {
         await replyMessageWithFallback(event, buildBotCapabilityMessage());
+        continue;
+      }
+
+      if (isWatchlistNewsSubscribeCommand(parsedMessage || userMessage)) {
+        let watchlist = await getStockWatchlist(conversationId);
+        if (!watchlist.length) {
+          watchlist = await migrateLegacyGroupWatchlist(
+            conversationId,
+            reminderTarget
+          );
+        }
+        if (!watchlist.length) {
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: `目前這個聊天室還沒有自選股。可以先說「${formatSuggestedCommandText(
+              "加入自選 2330",
+              event.source.type
+            )}」，再訂閱新聞。`,
+          });
+          continue;
+        }
+
+        const saved = await saveWatchlistNewsSubscription(
+          conversationId,
+          reminderTarget,
+          {
+            enabled: true,
+            hour: STOCK_WATCHLIST_NEWS_PUSH_HOUR,
+            minute: STOCK_WATCHLIST_NEWS_PUSH_MINUTE,
+          }
+        );
+        if (!saved) {
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: "訂閱自選股新聞失敗，可能是暫時連不上資料庫，請晚點再試。",
+          });
+          continue;
+        }
+
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: `好，我會每天 ${pad2(saved.hour)}:${pad2(
+            saved.minute
+          )} 推播這個聊天室的自選股新聞摘要。可直接說「${formatSuggestedCommandText(
+            "自選股新聞訂閱狀態",
+            event.source.type
+          )}」查看。`,
+        });
+        continue;
+      }
+
+      if (isWatchlistNewsUnsubscribeCommand(parsedMessage || userMessage)) {
+        const deleted = await deleteWatchlistNewsSubscription(conversationId);
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: deleted
+            ? "已取消訂閱自選股新聞。"
+            : `目前這個聊天室尚未訂閱自選股新聞。可以直接說「${formatSuggestedCommandText(
+                "訂閱自選股新聞",
+                event.source.type
+              )}」。`,
+        });
+        continue;
+      }
+
+      if (isWatchlistNewsSubscriptionStatusCommand(parsedMessage || userMessage)) {
+        const subscription = await getWatchlistNewsSubscription(conversationId);
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: formatWatchlistNewsSubscriptionStatus(
+            subscription,
+            event.source.type
+          ),
+        });
+        continue;
+      }
+
+      if (isWatchlistNewsCommand(parsedMessage || userMessage)) {
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: await buildWatchlistNewsDigestText(
+            conversationId,
+            reminderTarget,
+            event.source.type,
+            { mode: "query" }
+          ),
+        });
         continue;
       }
 
