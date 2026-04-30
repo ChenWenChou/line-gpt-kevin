@@ -1025,6 +1025,59 @@ function cleanReminderText(text) {
   return raw.length > max ? `${raw.slice(0, max - 3)}...` : raw;
 }
 
+function parseReminderDateParts(text, nowMs = Date.now()) {
+  const raw = String(text || "").trim();
+  const nowParts = taipeiPartsFromUtcMs(nowMs);
+
+  const slashMatch = raw.match(
+    /([0-9]{1,2})\s*\/\s*([0-9]{1,2})(?!\s*[:：])/
+  );
+  const zhMatch = raw.match(/([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日?/);
+  const matched = slashMatch || zhMatch;
+
+  if (!matched) return null;
+
+  const month = Number.parseInt(matched[1], 10);
+  const day = Number.parseInt(matched[2], 10);
+  if (!Number.isFinite(month) || !Number.isFinite(day)) return null;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+  let year = nowParts.year;
+  let candidate = utcMsFromTaipeiParts({
+    year,
+    month,
+    day,
+    hour: 0,
+    minute: 0,
+  });
+
+  const candidateParts = taipeiPartsFromUtcMs(candidate);
+  if (candidateParts.month !== month || candidateParts.day !== day) {
+    return null;
+  }
+
+  if (candidate < addTaipeiDays(nowMs, 0, 0, 0) - 1000) {
+    year += 1;
+    candidate = utcMsFromTaipeiParts({
+      year,
+      month,
+      day,
+      hour: 0,
+      minute: 0,
+    });
+    const nextParts = taipeiPartsFromUtcMs(candidate);
+    if (nextParts.month !== month || nextParts.day !== day) {
+      return null;
+    }
+  }
+
+  return {
+    year,
+    month,
+    day,
+  };
+}
+
 function parseReminderClock(text, nowMs = Date.now()) {
   let hour = null;
   let minute = 0;
@@ -1066,20 +1119,27 @@ function parseReminderClock(text, nowMs = Date.now()) {
   if (hasPmHint && hour < 12) hour += 12;
   if (/凌晨/.test(text) && hour === 12) hour = 0;
 
-  let dayOffset = 0;
-  if (/後天/.test(text)) dayOffset = 2;
-  else if (/明天|明早|明晚/.test(text)) dayOffset = 1;
+  const explicitDate = parseReminderDateParts(text, nowMs);
+  let targetDayParts = null;
 
-  const nowParts = taipeiPartsFromUtcMs(nowMs);
-  const baseUtc = utcMsFromTaipeiParts({
-    year: nowParts.year,
-    month: nowParts.month,
-    day: nowParts.day,
-    hour: 0,
-    minute: 0,
-  });
-  const targetDayUtc = baseUtc + dayOffset * 24 * 60 * 60 * 1000;
-  const targetDayParts = taipeiPartsFromUtcMs(targetDayUtc);
+  if (explicitDate) {
+    targetDayParts = explicitDate;
+  } else {
+    let dayOffset = 0;
+    if (/後天/.test(text)) dayOffset = 2;
+    else if (/明天|明早|明晚/.test(text)) dayOffset = 1;
+
+    const nowParts = taipeiPartsFromUtcMs(nowMs);
+    const baseUtc = utcMsFromTaipeiParts({
+      year: nowParts.year,
+      month: nowParts.month,
+      day: nowParts.day,
+      hour: 0,
+      minute: 0,
+    });
+    const targetDayUtc = baseUtc + dayOffset * 24 * 60 * 60 * 1000;
+    targetDayParts = taipeiPartsFromUtcMs(targetDayUtc);
+  }
 
   let dueAt = utcMsFromTaipeiParts({
     year: targetDayParts.year,
@@ -1089,12 +1149,19 @@ function parseReminderClock(text, nowMs = Date.now()) {
     minute,
   });
 
-  if (!hasPmHint && !hasAmHint && dayOffset === 0 && hour >= 1 && hour <= 11) {
+  if (
+    !explicitDate &&
+    !hasPmHint &&
+    !hasAmHint &&
+    !/後天|明天|明早|明晚/.test(text) &&
+    hour >= 1 &&
+    hour <= 11
+  ) {
     const plus12 = dueAt + 12 * 60 * 60 * 1000;
     if (dueAt <= nowMs && plus12 > nowMs) dueAt = plus12;
   }
 
-  if (dueAt <= nowMs + 30 * 1000) {
+  if (!explicitDate && dueAt <= nowMs + 30 * 1000) {
     dueAt += 24 * 60 * 60 * 1000;
   }
 
