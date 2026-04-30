@@ -773,7 +773,7 @@ async function setLastWeatherContext(userId, payload) {
 
 function getConversationId(event) {
   return (
-    event?.source?.userId || event?.source?.groupId || event?.source?.roomId || null
+    event?.source?.groupId || event?.source?.roomId || event?.source?.userId || null
   );
 }
 
@@ -954,6 +954,66 @@ async function getStockWatchlist(conversationId) {
   }
 }
 
+async function migrateLegacyGroupWatchlist(conversationId, target) {
+  if (!conversationId || !target?.targetId || !target?.targetType) return [];
+  if (target.targetType !== "group" && target.targetType !== "room") return [];
+
+  const legacyKey = getStockWatchlistKey(target.userId || null);
+  const nextKey = getStockWatchlistKey(conversationId);
+  if (!legacyKey || !nextKey || legacyKey === nextKey) return [];
+
+  const currentItems = await getStockWatchlist(conversationId);
+  if (currentItems.length) return currentItems;
+
+  try {
+    const legacyRaw = await redisGet(legacyKey);
+    if (!legacyRaw) return currentItems;
+    const parsed = JSON.parse(legacyRaw);
+    if (!Array.isArray(parsed) || !parsed.length) return currentItems;
+
+    const legacyItems = parsed
+      .map((item) => normalizeWatchlistItem(item, { conversationId: target.userId || null }))
+      .filter(Boolean);
+    const matchedItems = legacyItems.filter(
+      (item) =>
+        item.targetType === target.targetType && item.targetId === target.targetId
+    );
+    if (!matchedItems.length) return currentItems;
+
+    const dedupedMatched = [];
+    const seen = new Set();
+    for (const item of matchedItems) {
+      if (seen.has(item.code)) continue;
+      seen.add(item.code);
+      dedupedMatched.push({
+        ...item,
+        conversationId,
+      });
+    }
+
+    const remainingLegacyItems = legacyItems.filter(
+      (item) =>
+        !(
+          item.targetType === target.targetType &&
+          item.targetId === target.targetId &&
+          seen.has(item.code)
+        )
+    );
+
+    await saveStockWatchlist(conversationId, dedupedMatched);
+    if (remainingLegacyItems.length) {
+      await saveStockWatchlist(target.userId || null, remainingLegacyItems);
+    } else {
+      await redisDel(legacyKey);
+    }
+
+    return dedupedMatched;
+  } catch (err) {
+    console.error("migrateLegacyGroupWatchlist failed:", err);
+    return [];
+  }
+}
+
 async function saveStockWatchlist(conversationId, items) {
   const key = getStockWatchlistKey(conversationId);
   if (!key) return false;
@@ -1030,7 +1090,10 @@ function formatWatchlistListText(items = []) {
 }
 
 async function addStockToWatchlist(conversationId, target, stock) {
-  const watchlist = await getStockWatchlist(conversationId);
+  let watchlist = await getStockWatchlist(conversationId);
+  if (!watchlist.length) {
+    watchlist = await migrateLegacyGroupWatchlist(conversationId, target);
+  }
   const code = normalizeStockCode(stock?.code);
   if (!code) {
     return { ok: false, reason: "invalid-stock" };
@@ -1069,8 +1132,11 @@ async function addStockToWatchlist(conversationId, target, stock) {
   return { ok: true, duplicate: false, item, items: nextItems };
 }
 
-async function removeStockFromWatchlist(conversationId, removal) {
-  const watchlist = await getStockWatchlist(conversationId);
+async function removeStockFromWatchlist(conversationId, removal, target = null) {
+  let watchlist = await getStockWatchlist(conversationId);
+  if (!watchlist.length && target) {
+    watchlist = await migrateLegacyGroupWatchlist(conversationId, target);
+  }
   if (!watchlist.length) return { ok: false, reason: "empty" };
 
   let targetIndex = -1;
@@ -1124,8 +1190,11 @@ function buildWatchlistStatus(insight, stock) {
   return insight.riskLevel || "正常";
 }
 
-async function buildWatchlistSummaryText(conversationId) {
-  const watchlist = await getStockWatchlist(conversationId);
+async function buildWatchlistSummaryText(conversationId, target = null) {
+  let watchlist = await getStockWatchlist(conversationId);
+  if (!watchlist.length && target) {
+    watchlist = await migrateLegacyGroupWatchlist(conversationId, target);
+  }
   if (!watchlist.length) {
     return "目前這個聊天室還沒有自選股。可以直接說「加入自選 2330」。";
   }
@@ -1563,13 +1632,25 @@ function parseReminderCommand(rawText, options = {}) {
 function buildReminderTarget(event) {
   const type = event?.source?.type;
   if (type === "user" && event?.source?.userId) {
-    return { targetType: "user", targetId: event.source.userId };
+    return {
+      targetType: "user",
+      targetId: event.source.userId,
+      userId: event.source.userId,
+    };
   }
   if (type === "group" && event?.source?.groupId) {
-    return { targetType: "group", targetId: event.source.groupId };
+    return {
+      targetType: "group",
+      targetId: event.source.groupId,
+      userId: event.source.userId || null,
+    };
   }
   if (type === "room" && event?.source?.roomId) {
-    return { targetType: "room", targetId: event.source.roomId };
+    return {
+      targetType: "room",
+      targetId: event.source.roomId,
+      userId: event.source.userId || null,
+    };
   }
   return null;
 }
@@ -9535,15 +9616,22 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       if (isWatchlistSummaryCommand(parsedMessage || userMessage)) {
         await replyMessageWithFallback(event, {
           type: "text",
-          text: await buildWatchlistSummaryText(conversationId),
+          text: await buildWatchlistSummaryText(conversationId, reminderTarget),
         });
         continue;
       }
 
       if (isWatchlistListCommand(parsedMessage || userMessage)) {
+        let watchlist = await getStockWatchlist(conversationId);
+        if (!watchlist.length) {
+          watchlist = await migrateLegacyGroupWatchlist(
+            conversationId,
+            reminderTarget
+          );
+        }
         await replyMessageWithFallback(event, {
           type: "text",
-          text: formatWatchlistListText(await getStockWatchlist(conversationId)),
+          text: formatWatchlistListText(watchlist),
         });
         continue;
       }
@@ -9554,7 +9642,8 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       if (removeWatchlistCommand) {
         const removed = await removeStockFromWatchlist(
           conversationId,
-          removeWatchlistCommand
+          removeWatchlistCommand,
+          reminderTarget
         );
         if (!removed?.ok) {
           const errorText =
