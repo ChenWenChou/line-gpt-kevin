@@ -1233,15 +1233,50 @@ function parseStockPriceAlertCommand(text = "") {
   return null;
 }
 
+function parseWatchlistPriceAlertQuickCommand(text = "") {
+  const raw = String(text || "").trim();
+  if (!raw || !/^自選股/.test(raw) || !/提醒我?$/.test(raw)) return null;
+
+  const lteMatch = raw.match(
+    /^自選股\s*(.+?)\s*跌到\s*([0-9]+(?:\.[0-9]+)?)\s*提醒我?$/
+  );
+  if (lteMatch) {
+    return {
+      watchlistQuery: String(lteMatch[1] || "").trim(),
+      operator: "lte",
+      targetPrice: Number(lteMatch[2]),
+    };
+  }
+
+  const gteMatch = raw.match(
+    /^自選股\s*(.+?)\s*(?:漲到|到)\s*([0-9]+(?:\.[0-9]+)?)\s*提醒我?$/
+  );
+  if (gteMatch) {
+    return {
+      watchlistQuery: String(gteMatch[1] || "").trim(),
+      operator: "gte",
+      targetPrice: Number(gteMatch[2]),
+    };
+  }
+
+  return null;
+}
+
 function parseStockPriceAlertRemoveCommand(text = "") {
   const raw = String(text || "").trim();
-  const matched = raw.match(
-    /^(?:移除到價提醒|刪除到價提醒|取消到價提醒)\s*([0-9]{1,3})$/
-  );
+  const matched = raw.match(/^(?:移除到價提醒|刪除到價提醒|取消到價提醒)\s*(.+)$/);
   if (!matched) return null;
-  const index = Number.parseInt(matched[1], 10);
-  if (!Number.isFinite(index) || index <= 0) return null;
-  return { index };
+  const target = String(matched[1] || "").trim();
+  if (!target) return null;
+
+  if (/^[0-9]{1,3}$/.test(target)) {
+    const index = Number.parseInt(target, 10);
+    if (Number.isFinite(index) && index > 0) {
+      return { mode: "index", index };
+    }
+  }
+
+  return { mode: "query", query: target };
 }
 
 function formatWatchlistMarketLabel(item) {
@@ -1311,6 +1346,9 @@ function formatWatchlistListText(items = [], sourceType = "user") {
     .join("\n");
   return `目前自選股：\n${body}\n\n可直接說：\n- ${formatSuggestedCommandText(
     "自選股摘要",
+    sourceType
+  )}\n- ${formatSuggestedCommandText(
+    "自選股 1 到 950 提醒我",
     sourceType
   )}\n- ${formatSuggestedCommandText("移除自選 2", sourceType)}`;
 }
@@ -1549,7 +1587,21 @@ async function removeStockPriceAlert(conversationId, removal) {
   const alerts = await getStockPriceAlerts(conversationId);
   if (!alerts.length) return { ok: false, reason: "empty" };
 
-  const targetIndex = Number(removal?.index || 0) - 1;
+  let targetIndex = -1;
+  if (removal?.mode === "index") {
+    targetIndex = Number(removal?.index || 0) - 1;
+  } else if (removal?.mode === "query") {
+    const query = String(removal.query || "").trim();
+    const normalizedCode = normalizeStockCode(query);
+    targetIndex = alerts.findIndex((item) => item.code === normalizedCode);
+    if (targetIndex < 0) {
+      const normalizedQuery = normalizeStockText(query);
+      targetIndex = alerts.findIndex(
+        (item) => normalizeStockText(item.name) === normalizedQuery
+      );
+    }
+  }
+
   if (targetIndex < 0 || targetIndex >= alerts.length) {
     return { ok: false, reason: "not-found", items: alerts };
   }
@@ -1558,6 +1610,47 @@ async function removeStockPriceAlert(conversationId, removal) {
   const saved = await saveStockPriceAlerts(conversationId, alerts);
   if (!saved) return { ok: false, reason: "save-failed", items: alerts };
   return { ok: true, item: removed, items: alerts };
+}
+
+async function resolveWatchlistItemForPriceAlert(conversationId, query, target = null) {
+  let watchlist = await getStockWatchlist(conversationId);
+  if (!watchlist.length && target) {
+    watchlist = await migrateLegacyGroupWatchlist(conversationId, target);
+  }
+  if (!watchlist.length) {
+    return { ok: false, reason: "empty", items: watchlist };
+  }
+
+  const raw = String(query || "").trim();
+  if (!raw) {
+    return { ok: false, reason: "not-found", items: watchlist };
+  }
+
+  let item = null;
+  if (/^[0-9]{1,3}$/.test(raw)) {
+    const index = Number.parseInt(raw, 10);
+    if (Number.isFinite(index) && index > 0 && index <= watchlist.length) {
+      item = watchlist[index - 1];
+    }
+  }
+
+  if (!item) {
+    const normalizedCode = normalizeStockCode(raw);
+    item = watchlist.find((entry) => entry.code === normalizedCode) || null;
+  }
+
+  if (!item) {
+    const normalizedQuery = normalizeStockText(raw);
+    item =
+      watchlist.find((entry) => normalizeStockText(entry.name) === normalizedQuery) ||
+      null;
+  }
+
+  if (!item) {
+    return { ok: false, reason: "not-found", items: watchlist };
+  }
+
+  return { ok: true, item, items: watchlist };
 }
 
 async function getStocksMapFromCache() {
@@ -1699,8 +1792,9 @@ async function buildWatchlistMorningBriefText(
     minute: "2-digit",
     hour12: false,
   }).format(new Date());
+  const title = options?.force === true ? "📌【測試功能】自選股晨報" : "📌 自選股晨報";
   const lines = [
-    "📌 自選股晨報",
+    title,
     `資料時間：${dateLabel}`,
     "說明：這份晨報以自選股的行情、官方市場提示與目前判讀為主。",
   ];
@@ -10190,8 +10284,9 @@ function getTaipeiDateParts(now = new Date()) {
   };
 }
 
-async function pushWatchlistNewsSubscriptions(now = new Date()) {
+async function pushWatchlistNewsSubscriptions(now = new Date(), options = {}) {
   const { dateKey, hour, minute } = getTaipeiDateParts(now);
+  const force = options?.force === true;
   const members = await redisSMembers(STOCK_WATCHLIST_NEWS_SUBSCRIPTION_INDEX_KEY);
   let subscribed = 0;
   let pushed = 0;
@@ -10215,16 +10310,20 @@ async function pushWatchlistNewsSubscriptions(now = new Date()) {
         ? subscription.minute
         : STOCK_WATCHLIST_NEWS_PUSH_MINUTE;
 
-    if (hour !== expectedHour || minute !== expectedMinute) {
+    if (!force && (hour !== expectedHour || minute !== expectedMinute)) {
       skipped += 1;
       continue;
     }
 
-    const dedupKey = getWatchlistNewsPushDedupKey(conversationId, dateKey);
-    const acquired = dedupKey ? await redisSetNx(dedupKey, "1", 60 * 60 * 18) : null;
-    if (acquired === false) {
-      skipped += 1;
-      continue;
+    if (!force) {
+      const dedupKey = getWatchlistNewsPushDedupKey(conversationId, dateKey);
+      const acquired = dedupKey
+        ? await redisSetNx(dedupKey, "1", 60 * 60 * 18)
+        : null;
+      if (acquired === false) {
+        skipped += 1;
+        continue;
+      }
     }
 
     try {
@@ -10234,7 +10333,7 @@ async function pushWatchlistNewsSubscriptions(now = new Date()) {
         subscription.targetType === "group" || subscription.targetType === "room"
           ? "group"
           : "user",
-        { mode: "push" }
+        { mode: force ? "push_test" : "push", force }
       );
       await client.pushMessage(subscription.targetId, {
         type: "text",
@@ -10252,6 +10351,7 @@ async function pushWatchlistNewsSubscriptions(now = new Date()) {
     dateKey,
     hour,
     minute,
+    force,
     subscribed,
     pushed,
     skipped,
@@ -10352,7 +10452,8 @@ app.get("/api/push-watchlist-news", async (req, res) => {
   }
 
   try {
-    const stats = await pushWatchlistNewsSubscriptions(new Date());
+    const force = String(req.query?.force || "").trim() === "1";
+    const stats = await pushWatchlistNewsSubscriptions(new Date(), { force });
     return res.json(stats);
   } catch (err) {
     console.error("push watchlist news failed:", err);
@@ -10624,6 +10725,65 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           text: `已移除到價提醒：${removed.item.name}（${removed.item.code}）${formatStockPriceAlertOperator(
             removed.item.operator
           )} ${fmtTWPrice(removed.item.targetPrice)}`,
+        });
+        continue;
+      }
+
+      const watchlistQuickPriceAlert = parseWatchlistPriceAlertQuickCommand(
+        parsedMessage || userMessage
+      );
+      if (watchlistQuickPriceAlert) {
+        const resolved = await resolveWatchlistItemForPriceAlert(
+          conversationId,
+          watchlistQuickPriceAlert.watchlistQuery,
+          reminderTarget
+        );
+        if (!resolved?.ok) {
+          const errorText =
+            resolved?.reason === "empty"
+              ? `目前這個聊天室還沒有自選股。可以先說「${formatSuggestedCommandText(
+                  "加入自選 2330",
+                  event.source.type
+                )}」，再設到價提醒。`
+              : `找不到這個自選股。先輸入「${formatSuggestedCommandText(
+                  "自選股",
+                  event.source.type
+                )}」看目前清單。`;
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: errorText,
+          });
+          continue;
+        }
+
+        const stock = resolved.item;
+        const added = await addStockPriceAlert(
+          conversationId,
+          reminderTarget,
+          stock,
+          watchlistQuickPriceAlert.operator,
+          watchlistQuickPriceAlert.targetPrice
+        );
+        if (!added?.ok) {
+          const errorText =
+            added?.reason === "limit-exceeded"
+              ? `這個聊天室的到價提醒已達上限（${added.limit || 20} 筆），請先移除一些。`
+              : "建立到價提醒失敗，可能是暫時連不上資料庫，請晚點再試。";
+          await replyMessageWithFallback(event, {
+            type: "text",
+            text: errorText,
+          });
+          continue;
+        }
+
+        const conditionText = `${formatStockPriceAlertOperator(
+          added.item.operator
+        )} ${fmtTWPrice(added.item.targetPrice)}`;
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: added.duplicate
+            ? `這個到價提醒已經存在了：${added.item.name}（${added.item.code}）${conditionText}`
+            : `已設定到價提醒：${added.item.name}（${added.item.code}）${conditionText}`,
         });
         continue;
       }
