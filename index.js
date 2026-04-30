@@ -1055,20 +1055,24 @@ function isWatchlistNewsCommand(text = "") {
   return /^(自選股新聞|我的自選股新聞)$/.test(String(text || "").trim());
 }
 
+function isWatchlistMorningBriefCommand(text = "") {
+  return /^(自選股晨報|我的自選股晨報)$/.test(String(text || "").trim());
+}
+
 function isWatchlistNewsSubscribeCommand(text = "") {
-  return /^(訂閱自選股新聞|開啟自選股新聞訂閱)$/.test(
+  return /^(訂閱自選股新聞|開啟自選股新聞訂閱|訂閱自選股晨報|開啟自選股晨報訂閱)$/.test(
     String(text || "").trim()
   );
 }
 
 function isWatchlistNewsUnsubscribeCommand(text = "") {
-  return /^(取消訂閱自選股新聞|關閉自選股新聞訂閱)$/.test(
+  return /^(取消訂閱自選股新聞|關閉自選股新聞訂閱|取消訂閱自選股晨報|關閉自選股晨報訂閱)$/.test(
     String(text || "").trim()
   );
 }
 
 function isWatchlistNewsSubscriptionStatusCommand(text = "") {
-  return /^(自選股新聞訂閱狀態|查看自選股新聞訂閱)$/.test(
+  return /^(自選股新聞訂閱狀態|查看自選股新聞訂閱|自選股晨報訂閱狀態|查看自選股晨報訂閱)$/.test(
     String(text || "").trim()
   );
 }
@@ -1232,17 +1236,17 @@ async function deleteWatchlistNewsSubscription(conversationId) {
 
 function formatWatchlistNewsSubscriptionStatus(subscription, sourceType = "user") {
   if (!subscription?.enabled) {
-    return `目前這個聊天室尚未訂閱自選股新聞。可以直接說「${formatSuggestedCommandText(
-      "訂閱自選股新聞",
+    return `目前這個聊天室尚未訂閱自選股晨報。可以直接說「${formatSuggestedCommandText(
+      "訂閱自選股晨報",
       sourceType
     )}」。`;
   }
 
   return [
-    "目前自選股新聞訂閱狀態：已開啟",
+    "目前自選股晨報訂閱狀態：已開啟",
     `推播時間：每天 ${pad2(subscription.hour)}:${pad2(subscription.minute)}`,
     `可直接說：${formatSuggestedCommandText(
-      "取消訂閱自選股新聞",
+      "取消訂閱自選股晨報",
       sourceType
     )}`,
   ].join("\n");
@@ -1427,11 +1431,104 @@ async function buildWatchlistSummaryText(
   return lines.join("\n");
 }
 
-async function buildWatchlistNewsDigestText(
+async function buildWatchlistMorningBriefText(
   conversationId,
   target = null,
   sourceType = "user",
   options = {}
+) {
+  let watchlist = await getStockWatchlist(conversationId);
+  if (!watchlist.length && target) {
+    watchlist = await migrateLegacyGroupWatchlist(conversationId, target);
+  }
+  if (!watchlist.length) {
+    return `目前這個聊天室還沒有自選股。可以先說「${formatSuggestedCommandText(
+      "加入自選 2330",
+      sourceType
+    )}」，再查「${formatSuggestedCommandText(
+      "自選股晨報",
+      sourceType
+    )}」。`;
+  }
+
+  const stocksMap = await getStocksMapFromCache();
+  const replyLimit =
+    Number.isFinite(STOCK_WATCHLIST_NEWS_REPLY_LIMIT) &&
+    STOCK_WATCHLIST_NEWS_REPLY_LIMIT > 0
+      ? STOCK_WATCHLIST_NEWS_REPLY_LIMIT
+      : 5;
+  const targets = watchlist.slice(0, replyLimit);
+  const dateLabel = new Intl.DateTimeFormat("zh-TW", {
+    timeZone: "Asia/Taipei",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date());
+  const lines = [
+    "📌 自選股晨報",
+    `資料時間：${dateLabel}`,
+    "說明：這份晨報以自選股的行情、官方市場提示與目前判讀為主。",
+  ];
+
+  for (let index = 0; index < targets.length; index += 1) {
+    const item = targets[index];
+    const stock = stocksMap[item.code] || item;
+    try {
+      const result = await getStockQuoteWithFallback(stock);
+      const quote = result?.quote || null;
+      const insight = quote
+        ? adjustSingleStockInsightForIntraday(
+            await buildSingleStockInsight(stock),
+            quote,
+            result.source
+          )
+        : null;
+      const status = buildWatchlistStatus(insight, stock);
+      const percent =
+        typeof quote?.changePercent === "number" && Number.isFinite(quote.changePercent)
+          ? `${quote.changePercent > 0 ? "+" : ""}${quote.changePercent.toFixed(2)}%`
+          : "--";
+      const priceText = quote ? fmtTWPrice(quote.price) : "--";
+      const alertText = stock?.isDispositionStock
+        ? "處置股"
+        : stock?.isAttentionStock
+        ? "注意股"
+        : "目前未命中注意 / 處置股";
+      const summaryText = insight?.comment || "尚未整理出進一步判讀。";
+      lines.push(
+        `\n${index + 1}. ${item.name}（${item.code}）`,
+        `- 行情：${priceText}｜漲跌：${percent}`,
+        `- 官方市場提示：${alertText}`,
+        `- 判讀：${status}`,
+        `- 摘要：${summaryText}`
+      );
+    } catch (err) {
+      console.error("buildWatchlistMorningBriefText failed:", item?.code, err);
+      lines.push(
+        `\n${index + 1}. ${item.name}（${item.code}）`,
+        "- 官方市場提示：資料暫時取得失敗",
+        "- 摘要：這檔先保留在追蹤名單，稍後再查一次。"
+      );
+    }
+  }
+
+  if (watchlist.length > targets.length) {
+    lines.push(`\n其餘 ${watchlist.length - targets.length} 檔未展開。`);
+  }
+
+  lines.push(
+    "",
+    `可直接說：${formatSuggestedCommandText("訂閱自選股晨報", sourceType)}`
+  );
+  return lines.join("\n");
+}
+
+async function buildWatchlistOfficialNewsText(
+  conversationId,
+  target = null,
+  sourceType = "user"
 ) {
   let watchlist = await getStockWatchlist(conversationId);
   if (!watchlist.length && target) {
@@ -1464,68 +1561,42 @@ async function buildWatchlistNewsDigestText(
   }).format(new Date());
   const officialAnnouncementItems = await fetchOfficialAnnouncementItems();
   const lines = [
-    options.mode === "push" ? "📌 自選股新聞晨報" : "📌 自選股新聞摘要",
+    "📌 自選股新聞摘要",
     `資料時間：${dateLabel}`,
-    "說明：先顯示近期待抓到的官方公告；若沒有明確公告，再退回市場狀態摘要。",
+    "說明：這裡只列近期待抓到的官方公告；沒有公告時，不再退回技術面摘要。",
   ];
+  let hitCount = 0;
 
   for (let index = 0; index < targets.length; index += 1) {
     const item = targets[index];
     const stock = stocksMap[item.code] || item;
-    try {
-      const result = await getStockQuoteWithFallback(stock);
-      const quote = result?.quote || null;
-      const insight = quote
-        ? adjustSingleStockInsightForIntraday(
-            await buildSingleStockInsight(stock),
-            quote,
-            result.source
-          )
-        : null;
-      const status = buildWatchlistStatus(insight, stock);
-      const percent =
-        typeof quote?.changePercent === "number" && Number.isFinite(quote.changePercent)
-          ? `${quote.changePercent > 0 ? "+" : ""}${quote.changePercent.toFixed(2)}%`
-          : "--";
-      const priceText = quote ? fmtTWPrice(quote.price) : "--";
-      const alertText = stock?.isDispositionStock
-        ? "處置股"
-        : stock?.isAttentionStock
-        ? "注意股"
-        : "目前未命中注意 / 處置股";
-      const summaryText = insight?.comment || "尚未整理出進一步判讀。";
-      const officialItems = findRelevantOfficialAnnouncementsForStock(
-        stock,
-        officialAnnouncementItems
-      ).slice(0, 2);
+    const officialItems = findRelevantOfficialAnnouncementsForStock(
+      stock,
+      officialAnnouncementItems
+    ).slice(0, 2);
+    if (!officialItems.length) continue;
+    hitCount += 1;
 
-      const block = [
-        `\n${index + 1}. ${item.name}（${item.code}）`,
-        `- 行情：${priceText}｜漲跌：${percent}`,
-      ];
-
-      if (officialItems.length) {
-        officialItems.forEach((announcement, announcementIndex) => {
-          block.push(
-            `- 官方公告${
-              officialItems.length > 1 ? ` ${announcementIndex + 1}` : ""
-            }：${announcement.dateText}｜${announcement.subject}`
-          );
-        });
-      } else {
-        block.push(`- 官方市場提示：${alertText}`);
-      }
-
-      block.push(`- 判讀：${status}`, `- 摘要：${summaryText}`);
-      lines.push(...block);
-    } catch (err) {
-      console.error("buildWatchlistNewsDigestText failed:", item?.code, err);
+    lines.push(`\n${hitCount}. ${item.name}（${item.code}）`);
+    officialItems.forEach((announcement, announcementIndex) => {
       lines.push(
-        `\n${index + 1}. ${item.name}（${item.code}）`,
-        "- 官方市場提示：資料暫時取得失敗",
-        "- 摘要：這檔先保留在追蹤名單，稍後再查一次。"
+        `- 官方公告${
+          officialItems.length > 1 ? ` ${announcementIndex + 1}` : ""
+        }：${announcement.dateText}｜${announcement.subject}`
       );
-    }
+    });
+  }
+
+  if (!hitCount) {
+    return [
+      "📌 自選股新聞摘要",
+      `資料時間：${dateLabel}`,
+      "今天沒有抓到你自選股的明確官方公告。",
+      `如果你要看行情與技術狀態，請直接說：${formatSuggestedCommandText(
+        "自選股晨報",
+        sourceType
+      )}`,
+    ].join("\n");
   }
 
   if (watchlist.length > targets.length) {
@@ -1534,7 +1605,10 @@ async function buildWatchlistNewsDigestText(
 
   lines.push(
     "",
-    `可直接說：${formatSuggestedCommandText("訂閱自選股新聞", sourceType)}`
+    `如果你要看整體狀態，請直接說：${formatSuggestedCommandText(
+      "自選股晨報",
+      sourceType
+    )}`
   );
   return lines.join("\n");
 }
@@ -9797,7 +9871,7 @@ async function pushWatchlistNewsSubscriptions(now = new Date()) {
     }
 
     try {
-      const text = await buildWatchlistNewsDigestText(
+      const text = await buildWatchlistMorningBriefText(
         conversationId,
         subscription,
         subscription.targetType === "group" || subscription.targetType === "room"
@@ -10183,7 +10257,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
             text: `目前這個聊天室還沒有自選股。可以先說「${formatSuggestedCommandText(
               "加入自選 2330",
               event.source.type
-            )}」，再訂閱新聞。`,
+            )}」，再訂閱晨報。`,
           });
           continue;
         }
@@ -10200,7 +10274,7 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         if (!saved) {
           await replyMessageWithFallback(event, {
             type: "text",
-            text: "訂閱自選股新聞失敗，可能是暫時連不上資料庫，請晚點再試。",
+            text: "訂閱自選股晨報失敗，可能是暫時連不上資料庫，請晚點再試。",
           });
           continue;
         }
@@ -10209,8 +10283,8 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
           type: "text",
           text: `好，我會每天 ${pad2(saved.hour)}:${pad2(
             saved.minute
-          )} 推播這個聊天室的自選股新聞摘要。可直接說「${formatSuggestedCommandText(
-            "自選股新聞訂閱狀態",
+          )} 推播這個聊天室的自選股晨報。可直接說「${formatSuggestedCommandText(
+            "自選股晨報訂閱狀態",
             event.source.type
           )}」查看。`,
         });
@@ -10222,9 +10296,9 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         await replyMessageWithFallback(event, {
           type: "text",
           text: deleted
-            ? "已取消訂閱自選股新聞。"
-            : `目前這個聊天室尚未訂閱自選股新聞。可以直接說「${formatSuggestedCommandText(
-                "訂閱自選股新聞",
+            ? "已取消訂閱自選股晨報。"
+            : `目前這個聊天室尚未訂閱自選股晨報。可以直接說「${formatSuggestedCommandText(
+                "訂閱自選股晨報",
                 event.source.type
               )}」。`,
         });
@@ -10246,7 +10320,19 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       if (isWatchlistNewsCommand(parsedMessage || userMessage)) {
         await replyMessageWithFallback(event, {
           type: "text",
-          text: await buildWatchlistNewsDigestText(
+          text: await buildWatchlistOfficialNewsText(
+            conversationId,
+            reminderTarget,
+            event.source.type
+          ),
+        });
+        continue;
+      }
+
+      if (isWatchlistMorningBriefCommand(parsedMessage || userMessage)) {
+        await replyMessageWithFallback(event, {
+          type: "text",
+          text: await buildWatchlistMorningBriefText(
             conversationId,
             reminderTarget,
             event.source.type,
