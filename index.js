@@ -2339,11 +2339,15 @@ async function buildWeatherHelpMessage(conversationId, sourceType = "user") {
   }
   actions.push(
     { label: "台北現在天氣", text: "台北現在天氣" },
-    { label: "桃園今天天氣", text: "桃園今天天氣" }
+    { label: "桃園明天天氣", text: "桃園明天天氣" },
+    {
+      label: "帶傘提醒",
+      text: "每天早上七點提醒我桃園今天可能下雨要帶傘",
+    }
   );
   return createQuickReplyMessage(
-    `你可以直接問：${formatSuggestedCommandExamples(
-      ["台北現在天氣", "桃園明天天氣", "信義區現在會下雨嗎"],
+    `你可以直接查現在、明天，或建立帶傘提醒。常用問法：${formatSuggestedCommandExamples(
+      ["台北現在天氣", "桃園明天天氣", "每天早上七點提醒我桃園今天可能下雨要帶傘"],
       sourceType
     )}`,
     actions,
@@ -2363,12 +2367,13 @@ async function buildStockHelpMessage(conversationId, sourceType = "user") {
   actions.push(
     { label: "自選股", text: "自選股" },
     { label: "自選股摘要", text: "自選股摘要" },
+    { label: "自選股晨報", text: "自選股晨報" },
     { label: "今日盤後推薦股", text: "今日盤後推薦股" },
     { label: "2330 行情", text: "2330 行情" }
   );
   return createQuickReplyMessage(
-    `你可以直接問：${formatSuggestedCommandExamples(
-      ["2330 行情", "6168 股價", "自選股摘要", "40元內強勢股"],
+    `你可以查行情、自選股、晨報與盤後推薦股。常用問法：${formatSuggestedCommandExamples(
+      ["2330 行情", "自選股", "自選股晨報", "今日盤後推薦股"],
       sourceType
     )}`,
     actions,
@@ -2401,7 +2406,7 @@ async function buildZodiacHelpMessage(conversationId, sourceType = "user") {
 
 function buildCalorieHelpMessage(sourceType = "user") {
   return createQuickReplyMessage(
-    `你可以直接問：${formatSuggestedCommandExamples(
+    `你可以算單一食物，也可以一次加總多樣。常用問法：${formatSuggestedCommandExamples(
       ["雞腿便當熱量", "蛋餅加奶茶熱量", "我今天吃了飯糰、豆漿"],
       sourceType
     )}`,
@@ -2415,28 +2420,60 @@ function buildCalorieHelpMessage(sourceType = "user") {
   );
 }
 
+function buildReminderHelpMessage(sourceType = "user") {
+  return createQuickReplyMessage(
+    "你可以看提醒清單，也可以直接建立一次性提醒或每天帶傘提醒。",
+    [
+      { label: "提醒清單", text: "提醒清單" },
+      { label: "下班提醒", text: "等等六點半提醒我下班" },
+      { label: "點餐提醒", text: "明天早上八點提醒我點餐" },
+      {
+        label: "帶傘提醒",
+        text: "每天早上七點提醒我桃園今天可能下雨要帶傘",
+      },
+    ],
+    { sourceType }
+  );
+}
+
 function buildCommonFeaturesMessage(sourceType = "user") {
   return createQuickReplyMessage("常用功能如下，直接點一個。", [
     { label: "天氣", text: "天氣幫助" },
     { label: "股票", text: "股票幫助" },
-    { label: "提醒", text: "提醒清單" },
+    { label: "提醒", text: "提醒幫助" },
     { label: "星座", text: "星座幫助" },
     { label: "熱量", text: "熱量幫助" },
     { label: "更多", text: "你可以幫我做什麼" },
   ], { sourceType });
 }
 
-function buildBotCapabilityMessage() {
+function buildBotCapabilityMessage(sourceType = "user") {
   return {
     type: "text",
     text: [
-      "我目前可以幫你：",
-      "1. 查天氣與穿搭建議",
-      "2. 查股票行情、推薦股、線圖",
-      "3. 建立提醒、查看提醒、取消提醒",
-      "4. 看星座今日運勢",
-      "5. 估算食物熱量",
-      "6. 主動推播地震與天氣帶傘提醒",
+      "我目前常用功能：",
+      "",
+      "天氣：",
+      `- ${formatSuggestedCommandText("台北現在天氣", sourceType)}`,
+      `- ${formatSuggestedCommandText("桃園明天天氣", sourceType)}`,
+      `- ${formatSuggestedCommandText(
+        "每天早上七點提醒我桃園今天可能下雨要帶傘",
+        sourceType
+      )}`,
+      "",
+      "股票：",
+      `- ${formatSuggestedCommandText("2330 行情", sourceType)}`,
+      `- ${formatSuggestedCommandText("自選股", sourceType)}`,
+      `- ${formatSuggestedCommandText("自選股晨報", sourceType)}`,
+      `- ${formatSuggestedCommandText("今日盤後推薦股", sourceType)}`,
+      "",
+      "提醒：",
+      `- ${formatSuggestedCommandText("提醒清單", sourceType)}`,
+      `- ${formatSuggestedCommandText("明天早上八點提醒我點餐", sourceType)}`,
+      "",
+      "其他：",
+      `- ${formatSuggestedCommandText("雙子座今日運勢", sourceType)}`,
+      `- ${formatSuggestedCommandText("雞腿便當熱量", sourceType)}`,
     ].join("\n"),
   };
 }
@@ -10214,6 +10251,14 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
         continue;
       }
 
+      if (/^提醒幫助$/.test(parsedMessage || userMessage)) {
+        await replyMessageWithFallback(
+          event,
+          buildReminderHelpMessage(event.source.type)
+        );
+        continue;
+      }
+
       if (/^星座幫助$/.test(parsedMessage || userMessage)) {
         await replyMessageWithFallback(
           event,
@@ -10239,7 +10284,10 @@ app.post("/webhook", line.middleware(config), async (req, res) => {
       }
 
       if (/^你可以幫我做什麼$/.test(parsedMessage || userMessage)) {
-        await replyMessageWithFallback(event, buildBotCapabilityMessage());
+        await replyMessageWithFallback(
+          event,
+          buildBotCapabilityMessage(event.source.type)
+        );
         continue;
       }
 
