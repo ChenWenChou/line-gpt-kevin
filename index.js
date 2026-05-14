@@ -1798,48 +1798,52 @@ async function buildWatchlistMorningBriefText(
     `資料時間：${dateLabel}`,
     "說明：這份晨報以自選股的行情、官方市場提示與目前判讀為主。",
   ];
+  const recentTradingSnapshots = await getRecentTradingDaySnapshots(21);
+  const renderedTargets = await Promise.all(
+    targets.map(async (item, index) => {
+      const stock = stocksMap[item.code] || item;
+      try {
+        const result = await getStockQuoteWithFallback(stock);
+        const quote = result?.quote || null;
+        const baseInsight = await buildSingleStockInsight(
+          stock,
+          recentTradingSnapshots
+        );
+        const insight = quote
+          ? adjustSingleStockInsightForIntraday(baseInsight, quote, result.source)
+          : baseInsight;
+        const status = buildWatchlistStatus(insight, stock);
+        const percent =
+          typeof quote?.changePercent === "number" &&
+          Number.isFinite(quote.changePercent)
+            ? `${quote.changePercent > 0 ? "+" : ""}${quote.changePercent.toFixed(2)}%`
+            : "--";
+        const priceText = quote ? fmtTWPrice(quote.price) : "--";
+        const alertText = stock?.isDispositionStock
+          ? "處置股"
+          : stock?.isAttentionStock
+          ? "注意股"
+          : "目前未命中注意 / 處置股";
+        const summaryText = insight?.comment || "尚未整理出進一步判讀。";
+        return [
+          `\n${index + 1}. ${item.name}（${item.code}）`,
+          `- 行情：${priceText}｜漲跌：${percent}`,
+          `- 官方市場提示：${alertText}`,
+          `- 判讀：${status}`,
+          `- 摘要：${summaryText}`,
+        ];
+      } catch (err) {
+        console.error("buildWatchlistMorningBriefText failed:", item?.code, err);
+        return [
+          `\n${index + 1}. ${item.name}（${item.code}）`,
+          "- 官方市場提示：資料暫時取得失敗",
+          "- 摘要：這檔先保留在追蹤名單，稍後再查一次。",
+        ];
+      }
+    })
+  );
 
-  for (let index = 0; index < targets.length; index += 1) {
-    const item = targets[index];
-    const stock = stocksMap[item.code] || item;
-    try {
-      const result = await getStockQuoteWithFallback(stock);
-      const quote = result?.quote || null;
-      const insight = quote
-        ? adjustSingleStockInsightForIntraday(
-            await buildSingleStockInsight(stock),
-            quote,
-            result.source
-          )
-        : null;
-      const status = buildWatchlistStatus(insight, stock);
-      const percent =
-        typeof quote?.changePercent === "number" && Number.isFinite(quote.changePercent)
-          ? `${quote.changePercent > 0 ? "+" : ""}${quote.changePercent.toFixed(2)}%`
-          : "--";
-      const priceText = quote ? fmtTWPrice(quote.price) : "--";
-      const alertText = stock?.isDispositionStock
-        ? "處置股"
-        : stock?.isAttentionStock
-        ? "注意股"
-        : "目前未命中注意 / 處置股";
-      const summaryText = insight?.comment || "尚未整理出進一步判讀。";
-      lines.push(
-        `\n${index + 1}. ${item.name}（${item.code}）`,
-        `- 行情：${priceText}｜漲跌：${percent}`,
-        `- 官方市場提示：${alertText}`,
-        `- 判讀：${status}`,
-        `- 摘要：${summaryText}`
-      );
-    } catch (err) {
-      console.error("buildWatchlistMorningBriefText failed:", item?.code, err);
-      lines.push(
-        `\n${index + 1}. ${item.name}（${item.code}）`,
-        "- 官方市場提示：資料暫時取得失敗",
-        "- 摘要：這檔先保留在追蹤名單，稍後再查一次。"
-      );
-    }
-  }
+  renderedTargets.forEach((segments) => lines.push(...segments));
 
   if (watchlist.length > targets.length) {
     lines.push(`\n其餘 ${watchlist.length - targets.length} 檔未展開。`);
@@ -8043,10 +8047,13 @@ function adjustSingleStockInsightForRecentTrend(insight, metrics) {
   };
 }
 
-async function buildSingleStockInsight(stock) {
+async function buildSingleStockInsight(stock, snapshotsOverride = null) {
   if (!stock?.code) return null;
 
-  const snapshots = await getRecentTradingDaySnapshots(21);
+  const snapshots =
+    Array.isArray(snapshotsOverride) && snapshotsOverride.length
+      ? snapshotsOverride
+      : await getRecentTradingDaySnapshots(21);
   if (snapshots.length < 21) return null;
 
   const newestToOldest = snapshots;
