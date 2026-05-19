@@ -694,7 +694,7 @@ const REMINDER_RETRY_DELAY_SECONDS = Number(
   process.env.REMINDER_RETRY_DELAY_SECONDS || 60
 );
 const RECENT_HELP_TTL_SECONDS = Number(
-  process.env.RECENT_HELP_TTL_SECONDS || 60 * 60 * 24 * 30
+  process.env.RECENT_HELP_TTL_SECONDS || 60 * 60 * 24 * 14
 );
 const RECENT_HELP_MAX_ITEMS = Number(process.env.RECENT_HELP_MAX_ITEMS || 5);
 const TAIPEI_UTC_OFFSET_MINUTES = Number(
@@ -5811,10 +5811,10 @@ const STOCK_WATCHLIST_NEWS_ANNOUNCEMENT_CACHE_TTL_SECONDS = Number(
   process.env.STOCK_WATCHLIST_NEWS_ANNOUNCEMENT_CACHE_TTL_SECONDS || 15 * 60
 );
 const STOCK_INTRADAY_TTL_SECONDS = Number(
-  process.env.STOCK_INTRADAY_TTL_SECONDS || 60 * 60 * 36
+  process.env.STOCK_INTRADAY_TTL_SECONDS || 60 * 60 * 18
 );
 const STOCK_INTRADAY_MAX_POINTS = Number(
-  process.env.STOCK_INTRADAY_MAX_POINTS || 320
+  process.env.STOCK_INTRADAY_MAX_POINTS || 160
 );
 const STOCK_INTRADAY_MIN_POINTS = Number(
   process.env.STOCK_INTRADAY_MIN_POINTS || 3
@@ -5824,6 +5824,9 @@ const STOCK_INTRADAY_COLLECT_LIMIT = Number(
 );
 const POSTMARKET_PICKS_CACHE_PREFIX = "stock:postmarket:recommend:v8:";
 const DAILY_QUOTES_CACHE_PREFIX = "stock:dailyquotes:v2:";
+const DAILY_QUOTES_CACHE_TTL_SECONDS = Number(
+  process.env.DAILY_QUOTES_CACHE_TTL_SECONDS || 60 * 60 * 24 * 3
+);
 const POSTMARKET_SCAN_TTL_SECONDS = Number(
   process.env.POSTMARKET_SCAN_TTL_SECONDS || 60 * 60 * 20
 );
@@ -7223,7 +7226,15 @@ async function fetchTwseDailyQuotesByDate(date) {
 
   const quotes = parseTwseDailyQuotes(json, dateKey);
   if (Object.keys(quotes).length) {
-    await redisSet(cacheKey, JSON.stringify(quotes), "EX", 60 * 60 * 24 * 7);
+    await redisSet(
+      cacheKey,
+      JSON.stringify(quotes),
+      "EX",
+      Number.isFinite(DAILY_QUOTES_CACHE_TTL_SECONDS) &&
+        DAILY_QUOTES_CACHE_TTL_SECONDS > 0
+        ? DAILY_QUOTES_CACHE_TTL_SECONDS
+        : 60 * 60 * 24 * 3
+    );
   }
   return quotes;
 }
@@ -7256,7 +7267,15 @@ async function fetchTpexDailyQuotesByDate(date) {
 
   const quotes = parseTpexDailyQuotes(json, dateKey);
   if (Object.keys(quotes).length) {
-    await redisSet(cacheKey, JSON.stringify(quotes), "EX", 60 * 60 * 24 * 7);
+    await redisSet(
+      cacheKey,
+      JSON.stringify(quotes),
+      "EX",
+      Number.isFinite(DAILY_QUOTES_CACHE_TTL_SECONDS) &&
+        DAILY_QUOTES_CACHE_TTL_SECONDS > 0
+        ? DAILY_QUOTES_CACHE_TTL_SECONDS
+        : 60 * 60 * 24 * 3
+    );
   }
   return quotes;
 }
